@@ -1,0 +1,2 @@
+# Shell scripts and the hosted entrypoint are COPYed into Linux images: keep them LF.
+*.sh text eol=lf

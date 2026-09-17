@@ -1,0 +1,50 @@
+# Hosted Envoy node: TRP-only, SQLite on the container's local disk, replicated to an
+# S3-compatible bucket with Litestream.
+#
+# Native (non cross-compiled) build, like the Dockerfile.trponly that the demo's
+# scripts/patch-envoy.py generates — the cross-compilation toolchain buys nothing when
+# the image is built on the machine it runs on.
+#
+# The difference from Dockerfile.trponly is the runtime: Litestream restores
+# /data/trisa.db from the replica before Envoy starts and supervises Envoy while it
+# streams the WAL back out. /data is a plain directory, NOT a VOLUME: on Cloudflare
+# Containers the disk is ephemeral and the replica is the only durable copy. A VPS can
+# bind-mount a volume over /data and the same image skips the restore.
+#
+#   docker build -f Dockerfile.hosted --build-arg VERSION=hosted-$(git rev-parse --short=7 HEAD) -t trisa/envoy:hosted .
+#
+# See docker/hosted/README.md for the environment and the fail-closed rules.
+
+FROM golang:1.26-bookworm AS builder
+
+ARG VERSION=hosted
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ENV CGO_ENABLED=1
+RUN go build -ldflags="-X 'github.com/trisacrypto/envoy/pkg.GitVersion=${VERSION}'" \
+    -o /go/bin/envoy ./cmd/envoy
+
+FROM debian:bookworm-slim AS final
+
+LABEL description="TRISA Envoy node, TRP-only, SQLite replicated with Litestream"
+
+RUN set -x && apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates sqlite3 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /go/bin/envoy /usr/local/bin/envoy
+COPY --from=litestream/litestream:0.3.13 /usr/local/bin/litestream /usr/local/bin/litestream
+
+COPY docker/hosted/litestream.yml /etc/litestream.yml
+COPY docker/hosted/entrypoint.sh /usr/local/bin/hosted-entrypoint.sh
+
+RUN chmod 0755 /usr/local/bin/hosted-entrypoint.sh && \
+    mkdir -p /data /run/node && chmod 0700 /run/node
+
+ENTRYPOINT [ "/usr/local/bin/hosted-entrypoint.sh" ]
