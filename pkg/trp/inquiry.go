@@ -157,12 +157,8 @@ func (s *Server) Inquiry(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-func (s *Server) Resolve(c *gin.Context) {
-	log.Info().Msg("TRP resolve received")
-
-	// A 204 should be sent in response to a transfer inquiry resolution.
-	c.Status(http.StatusNoContent)
-}
+// NOTE: Server.Resolve is implemented in resolve.go so that an inbound resolution
+// actually updates the transaction it refers to.
 
 func (s *Server) Confirmation(c *gin.Context) {
 	log.Info().Msg("TRP confirmation received")
