@@ -251,6 +251,14 @@ func (s *Server) WebhookInquiry(ctx context.Context, packet *postman.TRPPacket) 
 	}
 
 	if reply.Error != nil {
+		// A retryable error is the callback asking for a repair, not a decision. TRP
+		// has no repair message, so the inquiry is acknowledged and left for review
+		// rather than communicated to the originator as a permanent rejection.
+		if reply.Error.Retry {
+			packet.Log.Warn().Str("code", reply.Error.Code.String()).Str("message", reply.Error.Message).Msg("compliance callback returned a retryable error for a trp inquiry; acknowledging instead")
+			return pending, nil
+		}
+
 		comment := reply.Error.Message
 
 		if comment == "" {
