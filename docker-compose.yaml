@@ -1,3 +1,5 @@
+# Host ports for this two-node lab live in the 20000s (xago 2008x, luno 2009x,
+# gds 2043x) so they never clash with other local stacks.
 services:
   xago.local:
     build:
@@ -10,9 +12,9 @@ services:
     depends_on:
       - gds.local
     ports:
-      - 8000:8000
-      - 8100:8100
-      - 8200:8200
+      - 20080:20080
+      - 20081:8100
+      - 20082:8200
     volumes:
       - ./tmp/xago:/data
     secrets:
@@ -26,10 +28,10 @@ services:
       - TRISA_DATABASE_URL=sqlite3:////data/trisa.db
       - TRISA_ENDPOINT=xago.local:8100
       - TRISA_WEB_ENABLED=true
-      - TRISA_WEB_BIND_ADDR=:8000
-      - TRISA_WEB_ORIGIN=http://xago.local:8000
-      - TRISA_WEB_AUDIENCE=http://xago.local:8000
-      - TRISA_WEB_ISSUER=http://xago.local:8000
+      - TRISA_WEB_BIND_ADDR=:20080
+      - TRISA_WEB_ORIGIN=http://xago.local:20080
+      - TRISA_WEB_AUDIENCE=http://xago.local:20080
+      - TRISA_WEB_ISSUER=http://xago.local:20080
       - TRISA_WEB_AUTH_COOKIE_DOMAIN=xago.local
       - TRISA_NODE_ENABLED=true
       - TRISA_NODE_BIND_ADDR=:8100
@@ -53,9 +55,9 @@ services:
       - gds.local
       - xago.local
     ports:
-      - 9000:9000
-      - 9100:9100
-      - 9200:8200
+      - 20090:20090
+      - 20091:9100
+      - 20092:8200
     volumes:
       - ./tmp/luno:/data
     secrets:
@@ -69,10 +71,10 @@ services:
       - TRISA_DATABASE_URL=sqlite3:////data/trisa.db
       - TRISA_ENDPOINT=luno.local:9100
       - TRISA_WEB_ENABLED=true
-      - TRISA_WEB_BIND_ADDR=:9000
-      - TRISA_WEB_ORIGIN=http://luno.local:9000
-      - TRISA_WEB_AUDIENCE=http://luno.local:9000
-      - TRISA_WEB_ISSUER=http://luno.local:9000
+      - TRISA_WEB_BIND_ADDR=:20090
+      - TRISA_WEB_ORIGIN=http://luno.local:20090
+      - TRISA_WEB_AUDIENCE=http://luno.local:20090
+      - TRISA_WEB_ISSUER=http://luno.local:20090
       - TRISA_WEB_AUTH_COOKIE_DOMAIN=luno.local
       - TRISA_NODE_ENABLED=true
       - TRISA_NODE_BIND_ADDR=:9100
@@ -93,9 +95,9 @@ services:
     image: trisa/gds:v1.10.0
     init: true
     ports:
-      - 4433:4433
-      - 4434:4434
-      - 4435:4435
+      - 20433:4433
+      - 20434:4434
+      - 20435:4435
     volumes:
       - ./tmp/gds:/data
     environment:
