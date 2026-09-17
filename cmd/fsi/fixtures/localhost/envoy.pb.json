@@ -3,7 +3,7 @@
   "entity": {
     "name": {
       "name_identifiers": [{
-        "legal_person_name": "Localhost Development",
+        "legal_person_name": "Xago",
         "legal_person_name_identifier_type": "LEGAL_PERSON_NAME_TYPE_CODE_LEGL"
       }]
     },
@@ -25,30 +25,30 @@
   "contacts": {
     "administrative": {
       "name": "Lillian W. Robertson",
-      "email": "lillian@envoy.local",
+      "email": "lillian@xago.local",
       "phone": "+1 859-322-9025"
     },
     "legal": {
       "name": "Gloria C. Coombs",
-      "email": "gloria@envoy.local",
+      "email": "gloria@xago.local",
       "phone": "+1 757-558-3634"
     },
     "billing": {
       "name": "Kyle S. Steller",
-      "email": "kyle@envoy.local",
+      "email": "kyle@xago.local",
       "phone": ""
     },
     "technical": {
       "name": "Cortez B. Adams",
-      "email": "cortez@envoy.local",
+      "email": "cortez@xago.local",
       "phone": ""
     }
   },
   "identity_certificate": null,
   "signing_certificates": null,
-  "common_name": "envoy.local",
-  "trisa_endpoint": "envoy.local:8100",
-  "website": "http://envoy.local:8000",
+  "common_name": "xago.local",
+  "trisa_endpoint": "xago.local:8100",
+  "website": "http://xago.local:8000",
   "business_category": "BUSINESS_ENTITY",
   "vasp_categories": ["DEX", "Exchange"],
   "established_on": "2024-06-05",
