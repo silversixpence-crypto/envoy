@@ -27,7 +27,24 @@ func TransactionFromPayload(in *api.Payload) *models.Transaction {
 	)
 
 	data := &generic.Transaction{}
-	if err = in.Transaction.UnmarshalTo(data); err == nil {
+	err = in.Transaction.UnmarshalTo(data)
+
+	if err != nil {
+		// TRP payloads carry the reference transaction inside a generic.TRP message.
+		trpmsg := &generic.TRP{}
+		if terr := in.Transaction.UnmarshalTo(trpmsg); terr == nil && trpmsg.Transaction != nil {
+			data = trpmsg.Transaction
+			err = nil
+
+			// TRP 3.2 amounts travel as integers in the asset's base units;
+			// restore display units for storage and the UI.
+			if inq := trpmsg.GetInquiry(); inq != nil && inq.Asset != nil {
+				data.Amount = FromBaseUnits(data.Amount, inq.Asset["dti"])
+			}
+		}
+	}
+
+	if err == nil {
 		switch {
 		case data.Network != "" && data.AssetType != "":
 			virtualAsset = fmt.Sprintf("%s (%s)", data.Network, data.AssetType)

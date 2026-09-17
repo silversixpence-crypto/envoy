@@ -146,7 +146,22 @@ func (p *Packet) Sunrise() *SunrisePacket {
 }
 
 func (p *Packet) TRP() *TRPPacket {
-	return nil
+	packet := &TRPPacket{
+		Packet: *p,
+	}
+
+	// Add parent to submessages
+	packet.In.packet = &packet.Packet
+	packet.Out.packet = &packet.Packet
+
+	// Keep track of the outgoing payload and envelope id for the TRP message.
+	if packet.Out.Envelope != nil {
+		packet.payload, _ = packet.Out.Envelope.Payload()
+		packet.envelopeID, _ = uuid.Parse(packet.Out.Envelope.ID())
+	}
+
+	packet.Packet.resolver = packet
+	return packet
 }
 
 func (p *Packet) RefreshTransaction() (err error) {

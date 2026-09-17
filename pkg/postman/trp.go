@@ -163,6 +163,11 @@ func (p *TRPPacket) Remote() sql.NullString {
 // If a hostname is available, perform an identity lookup.
 // Note: name matches must be exact; they are not fuzzy searches.
 func (p *TRPPacket) ResolveCounterparty() (err error) {
+	// Outgoing packets already know which counterparty they are addressed to.
+	if p.Counterparty != nil {
+		return nil
+	}
+
 	// Attempt to resolve the counterparty from the incoming mTLS connection
 	if p.mtls != nil {
 		if len(p.mtls.PeerCertificates) > 0 {

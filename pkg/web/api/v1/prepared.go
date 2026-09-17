@@ -101,13 +101,15 @@ func (r *Routing) Validate() (err error) {
 			err = ValidationError(err, IncorrectField("routing.email", "not used for trisa protocol"))
 		}
 	case enum.ProtocolTRP:
-		// For TRP the travel address is required
-		if r.TravelAddress == "" {
-			err = ValidationError(err, MissingField("routing.travel_address"))
+		// For TRP either the travel address or the counterparty ID must be set:
+		// the id form disambiguates per-customer travel addresses that share a
+		// hostname, which hostname-based counterparty resolution cannot tell apart.
+		if r.TravelAddress == "" && r.CounterpartyID.IsZero() {
+			err = ValidationError(err, OneOfMissing("routing.travel_address", "routing.counterparty_id"))
 		}
 
-		if !r.CounterpartyID.IsZero() {
-			err = ValidationError(err, IncorrectField("routing.counterparty_id", "not used for trp protocol"))
+		if r.TravelAddress != "" && !r.CounterpartyID.IsZero() {
+			err = ValidationError(err, OneOfTooMany("routing.travel_address", "routing.counterparty_id"))
 		}
 
 		if r.Counterparty != "" {
