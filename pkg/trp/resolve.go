@@ -160,11 +160,16 @@ func (s *Server) Resolve(c *gin.Context) {
 	// Record the decision as an incoming secure envelope. Beyond the audit trail this is
 	// load bearing for approvals: the confirmation this node sends when the transfer
 	// completes has to go to the callback named in the approval, and this envelope is the
-	// only place it is kept. A failure here is logged rather than fatal, because the
-	// status change is the part the counterparty is waiting on.
+	// only place it is kept. A failure is therefore fatal: committing "accepted" without
+	// the envelope would leave a transfer that can never be completed, and the
+	// counterparty cannot resubmit once the status has moved. Answering 500 keeps the
+	// transfer pending so the counterparty retries.
 	if status != enum.StatusPending {
 		if err = s.storeResolution(ctx, db, envelopeID, counterparty, in); err != nil {
-			log.Warn().Err(err).Msg("could not store the incoming envelope for a trp resolution")
+			log.Error().Err(err).Bool("stored_to_database", false).Msg("could not store the incoming envelope for a trp resolution")
+			c.AbortWithError(http.StatusInternalServerError, err)
+
+			return
 		}
 	}
 

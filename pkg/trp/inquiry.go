@@ -260,7 +260,13 @@ func (s *Server) WebhookInquiry(ctx context.Context, packet *postman.TRPPacket) 
 		return &trp.Resolution{Rejected: comment}, nil
 	}
 
-	if reply.TransferState() != trisa.TransferAccepted {
+	// A rejection can also arrive as a bare transfer action without an error object;
+	// it is still a decision and must reach the originator as one.
+	switch reply.TransferState() {
+	case trisa.TransferRejected:
+		return &trp.Resolution{Rejected: defaultRejection}, nil
+	case trisa.TransferAccepted:
+	default:
 		return pending, nil
 	}
 

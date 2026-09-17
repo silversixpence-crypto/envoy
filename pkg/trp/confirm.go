@@ -27,6 +27,7 @@ import (
 	"github.com/trisacrypto/envoy/pkg/webhook"
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
 	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
+	generic "github.com/trisacrypto/trisa/pkg/trisa/data/generic/v1beta1"
 	"github.com/trisacrypto/trisa/pkg/trisa/envelope"
 	"github.com/trisacrypto/trisa/pkg/trisa/keys"
 )
@@ -138,8 +139,19 @@ func (s *Server) Confirmation(c *gin.Context) {
 	}
 
 	// Only an approved transfer can be confirmed: anything else has either not been
-	// resolved yet or has already reached a terminal status.
+	// resolved yet or has already reached a terminal status. The one exception is a
+	// retry of a confirmation that was already applied: if the originator never saw
+	// the 204 it will send the same confirmation again, and answering 409 would leave
+	// the originator rolled back while this node is completed. An identical retry is
+	// acknowledged; a conflicting one is still refused.
 	if transaction.Status != enum.StatusAccepted {
+		if transaction.Status == status && s.confirmationMatches(ctx, envelopeID, in) {
+			log.Info().Msg("acknowledging a repeated trp confirmation that was already applied")
+			c.Status(http.StatusNoContent)
+
+			return
+		}
+
 		log.Warn().Msg("refusing trp confirmation for a transfer that is not awaiting one")
 		c.AbortWithError(http.StatusConflict, ErrNotAwaitingConfirmation)
 
@@ -229,6 +241,31 @@ func (s *Server) Confirmation(c *gin.Context) {
 
 	// A 204 should be sent in response to a transfer confirmation.
 	c.Status(http.StatusNoContent)
+}
+
+// confirmationMatches reports whether the confirmation most recently stored for the
+// transfer carries the same transaction id or cancellation as the one being retried.
+func (s *Server) confirmationMatches(ctx context.Context, envelopeID uuid.UUID, in *trp.Confirmation) bool {
+	payload, err := s.latestPayload(ctx, envelopeID)
+
+	if err != nil || payload == nil || payload.Transaction == nil {
+		return false
+	}
+
+	msg := &generic.TRP{}
+
+	if err = payload.Transaction.UnmarshalTo(msg); err != nil {
+		return false
+	}
+
+	switch {
+	case in.TXID != "":
+		return msg.GetConfirmed().GetTxid() == in.TXID
+	case in.Canceled != "":
+		return msg.GetCanceled().GetCanceled() == in.Canceled
+	default:
+		return false
+	}
 }
 
 // confirmationPacket builds the incoming half of a confirmation from the payload of the
