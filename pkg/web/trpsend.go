@@ -39,7 +39,10 @@ const (
 	trpAPIVersion = "3.2.1"
 )
 
-var ErrNoTRPEndpoint = errors.New("counterparty does not have a trp endpoint")
+var (
+	ErrNoTRPEndpoint        = errors.New("counterparty does not have a trp endpoint")
+	ErrNoBeneficiaryAddress = errors.New("cannot approve a trp transfer without a beneficiary payment address")
+)
 
 // SendTRP posts an outgoing travel rule inquiry to the counterparty's TRP endpoint,
 // records the returned resolution as the incoming message, and stores both envelopes.
@@ -112,10 +115,11 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 			Callback: s.trpCallback(endpoint.Scheme, envelopeID),
 		}
 
-		// TRP requires a payment address on an approval; fall back to the envelope
-		// id so a transfer without a beneficiary wallet is still resolvable.
+		// TRP requires a payment address on an approval and there is no sensible
+		// substitute: anything else the originator picks up from this field is not an
+		// address it can pay to.
 		if resolution.Approved.Address == "" {
-			resolution.Approved.Address = envelopeID
+			return ErrNoBeneficiaryAddress
 		}
 	case trisa.TransferRejected, trisa.TransferRepair:
 		resolution.Rejected = rejectionComment(p.Out.Envelope)
