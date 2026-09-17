@@ -118,10 +118,15 @@ func (s *Server) SendPacket(ctx context.Context, protocol enum.Protocol, packet 
 			return nil, ErrDisabled
 		}
 
-		return nil, errors.New("TRP sending is temporarily disabled as we refresh Envoy to v1.0.0")
-		// if err = s.SendTRP(ctx, packet.TRP()); err != nil {
-		// 	return err
-		// }
+		// TRP messages are plaintext on the wire, so SendTRP seals and stores both
+		// envelopes with the local storage key and we return early.
+		wrapped := packet.TRP()
+
+		if err = s.SendTRP(ctx, wrapped); err != nil {
+			return nil, err
+		}
+
+		return &wrapped.Packet, nil
 	case enum.ProtocolSunrise:
 		if !s.conf.Sunrise.Enabled {
 			return nil, ErrDisabled

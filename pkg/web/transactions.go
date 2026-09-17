@@ -793,6 +793,14 @@ func (s *Server) AcceptTransaction(c *gin.Context) {
 	// NOTE: SendEnvelope handles storing the incoming and outgoing envelopes in the database
 	if err = s.SendEnvelope(ctx, packet); err != nil {
 		c.Error(err)
+
+		// A TRP approval without a beneficiary payment address is a bad request from
+		// the reviewer rather than a failure to reach the counterparty.
+		if errors.Is(err, ErrNoBeneficiaryAddress) {
+			c.JSON(http.StatusUnprocessableEntity, api.Error(err))
+			return
+		}
+
 		c.JSON(http.StatusInternalServerError, api.Error("unable to send transfer to remote counterparty"))
 		return
 	}

@@ -101,6 +101,10 @@ func (s *Server) Run(sock net.Listener) {
 
 func (s *Server) Shutdown() error {
 	log.Trace().Msg("gracefully shutting down the trisa server")
+	if s.srv == nil {
+		log.Debug().Msg("trisa server was not enabled, nothing to stop")
+		return nil
+	}
 	s.srv.GracefulStop()
 	log.Debug().Msg("trisa server stopped")
 	return nil

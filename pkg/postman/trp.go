@@ -163,6 +163,11 @@ func (p *TRPPacket) Remote() sql.NullString {
 // If a hostname is available, perform an identity lookup.
 // Note: name matches must be exact; they are not fuzzy searches.
 func (p *TRPPacket) ResolveCounterparty() (err error) {
+	// Outgoing packets already know which counterparty they are addressed to.
+	if p.Counterparty != nil {
+		return nil
+	}
+
 	// Attempt to resolve the counterparty from the incoming mTLS connection
 	if p.mtls != nil {
 		if len(p.mtls.PeerCertificates) > 0 {
@@ -199,8 +204,25 @@ func (p *TRPPacket) ResolveCounterparty() (err error) {
 	// to associate with the tranaction). Otherwise return no error in the case of an
 	// update because of resolution or confirmation.
 	if p.DB.Created() {
+		// An unknown sender is registered as an unvetted peer counterparty rather
+		// than refused; the transfer still lands in the inbox for review.
+		if inquiry, ok := p.message.(*trp.Inquiry); ok {
+			var counterparty *models.Counterparty
+
+			if counterparty, err = peerCounterpartyFromInquiry(inquiry, p.Log); err != nil {
+				p.Log.Warn().Err(err).Msg("could not register unknown trp sender as a peer counterparty")
+				return ErrNoCounterpartyInfo
+			}
+
+			p.Counterparty = counterparty
+			p.Log.Info().Str("common_name", counterparty.CommonName).Str("name", counterparty.Name).Msg("unknown trp sender auto-registered as a peer counterparty")
+
+			return nil
+		}
+
 		return ErrNoCounterpartyInfo
 	}
+
 	return nil
 }
 

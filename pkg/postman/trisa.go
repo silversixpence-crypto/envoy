@@ -143,5 +143,15 @@ func (p *TRISAPacket) ResolveCounterparty() (err error) {
 }
 
 func (p *TRISAPacket) Remote() sql.NullString {
+	if p.PeerInfo == nil {
+		// No TRISA peer is resolved when the packet is sent over another protocol
+		// (e.g. a TRP resolution), so fall back to the counterparty.
+		if p.Counterparty != nil {
+			return sql.NullString{Valid: p.Counterparty.CommonName != "", String: p.Counterparty.CommonName}
+		}
+
+		return sql.NullString{Valid: false}
+	}
+
 	return sql.NullString{Valid: p.PeerInfo.CommonName != "", String: p.PeerInfo.CommonName}
 }

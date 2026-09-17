@@ -30,7 +30,7 @@ func APICheck(c *gin.Context) {
 	}
 
 	// Set the APIVersion header in the outgoing response
-	c.Header(openvasp.APIVersionHeader, openvasp.APIVersion)
+	c.Header(openvasp.APIVersionHeader, "3.2.1")
 	c.Set(ctxAPIVersionKey, apiVersion)
 
 	// If API Extenions are set, add them to the context.

@@ -37,11 +37,11 @@ func TestRoutingValidate(t *testing.T) {
 			},
 			{
 				`{"protocol": "trp"}`,
-				ValidationError(nil, MissingField("routing.travel_address")),
+				ValidationError(nil, OneOfMissing("routing.travel_address", "routing.counterparty_id")),
 			},
 			{
 				`{"protocol": "trp", "counterparty_id": "01JPJ1R8RXACZ1FQNQK5M62SD7", "travel_address": "ta2CdjAHciVXahu8sPNTbtGkD6BnaVq4WKcHG6ks2RB4nN4YEvtGMviaNXxsgFWEPV58HtC"}`,
-				ValidationError(nil, IncorrectField("routing.counterparty_id", "not used for trp protocol")),
+				ValidationError(nil, OneOfTooMany("routing.travel_address", "routing.counterparty_id")),
 			},
 			{
 				`{"protocol": "trp", "counterparty": "Alice VASP", "travel_address": "ta2CdjAHciVXahu8sPNTbtGkD6BnaVq4WKcHG6ks2RB4nN4YEvtGMviaNXxsgFWEPV58HtC"}`,
@@ -82,6 +82,7 @@ func TestRoutingValidate(t *testing.T) {
 			`{"protocol": "trisa", "travel_address": "ta2CdjAHciVXahu8sPNTbtGkD6BnaVq4WKcHG6ks2RB4nN4YEvtGMviaNXxsgFWEPV58HtC"}`,
 			`{"protocol": "trisa", "counterparty_id": "01JPJ1R8RXACZ1FQNQK5M62SD7"}`,
 			`{"protocol": "trp", "travel_address": "ta2CdjAHciVXahu8sPNTbtGkD6BnaVq4WKcHG6ks2RB4nN4YEvtGMviaNXxsgFWEPV58HtC"}`,
+			`{"protocol": "trp", "counterparty_id": "01JPJ1R8RXACZ1FQNQK5M62SD7"}`,
 			`{"protocol": "sunrise", "email": "test@example.com"}`,
 			`{"protocol": "sunrise", "email": "John Doe <test@example.com>"}`,
 			`{"protocol": "sunrise", "counterparty_id": "01JPJ1R8RXACZ1FQNQK5M62SD7"}`,

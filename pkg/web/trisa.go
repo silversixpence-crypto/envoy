@@ -23,6 +23,10 @@ func (s *Server) SendEnvelope(ctx context.Context, packet *postman.TRISAPacket) 
 		if err = s.SendTRISA(ctx, packet); err != nil {
 			return err
 		}
+	case enum.ProtocolTRP:
+		// TRP resolutions are acknowledged with an empty response, so
+		// SendTRPResolution synthesises and stores both envelopes itself.
+		return s.SendTRPResolution(ctx, packet)
 	default:
 		return fmt.Errorf("could not send secure envelope: unknown protocol %q", packet.Counterparty.Protocol)
 	}
