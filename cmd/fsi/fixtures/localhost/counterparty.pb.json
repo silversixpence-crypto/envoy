@@ -49,7 +49,7 @@
   "signing_certificates": null,
   "common_name": "luno.local",
   "trisa_endpoint": "luno.local:9100",
-  "website": "http://luno.local:9000",
+  "website": "http://luno.local:20090",
   "business_category": "BUSINESS_ENTITY",
   "vasp_categories": ["DEX", "Exchange"],
   "established_on": "2022-12-15",

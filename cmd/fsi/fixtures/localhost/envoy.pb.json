@@ -48,7 +48,7 @@
   "signing_certificates": null,
   "common_name": "xago.local",
   "trisa_endpoint": "xago.local:8100",
-  "website": "http://xago.local:8000",
+  "website": "http://xago.local:20080",
   "business_category": "BUSINESS_ENTITY",
   "vasp_categories": ["DEX", "Exchange"],
   "established_on": "2024-06-05",
