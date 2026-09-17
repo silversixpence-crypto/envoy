@@ -34,11 +34,46 @@ The entrypoint is `docker/hosted/entrypoint.sh`. Four steps, each logged with a
    0600) and export the `TRISA_*` variables that point at them.
 2. `litestream restore -if-db-not-exists -if-replica-exists /data/trisa.db`.
 3. Check that a database now exists. If not, demand `NODE_BOOTSTRAP=1`.
+   3b. On the bootstrap path only, and only when `NODE_BOOTSTRAP_CALLBACK_URL` is set:
+   mint the node's first API key and POST it to that URL. See
+   [The bootstrap callback](#the-bootstrap-callback).
 4. `exec litestream replicate -exec "/usr/local/bin/envoy serve"`. Litestream is PID 1
    and exits when Envoy exits.
 
 Step 3 logs which of three paths the node took: `restored`, `existing-volume` or
 `bootstrap`. That line is the one to grep for when a node comes up empty.
+
+## The bootstrap callback
+
+A brand new node has no API key, and nothing outside the container can mint one: on
+Cloudflare Containers there is no `docker exec`. So the node hands its first key out
+itself, once, on the only boot where it has a database nobody has ever held a key for.
+
+Set `NODE_BOOTSTRAP_CALLBACK_URL` and `NODE_BOOTSTRAP_TOKEN` alongside
+`NODE_BOOTSTRAP=1` and the bootstrap branch of step 3 will:
+
+1. Run `envoy apikey:create all`. The CLI opens the store, which creates and migrates
+   `/data/trisa.db`, so this works before `envoy serve` has ever run. The key lands in
+   the database Litestream then replicates, so it survives every later restore.
+2. Parse the `client id:` and `client secret:` lines out of the command's output.
+3. `POST` `{"slug": "<LITESTREAM_PATH>", "client_id": …, "client_secret": …}` as JSON
+   to the callback URL with `Authorization: Bearer $NODE_BOOTSTRAP_TOKEN`. One attempt
+   and five retries, backing off 2, 4, 8, 16 and 32 seconds.
+4. Continue to step 4 only if the callback was accepted. **If it never succeeds the
+   container exits 1**: a node whose only API key is held by nobody cannot be driven,
+   and leaving it running would put an unreachable database in the bucket under this
+   slug. Delete the prefix and provision again.
+
+The secret is never logged, never passed as a command argument and never left on disk:
+the request body goes to a 0600 file under `/run/node` and the bearer token to a curl
+config file, and both are removed before step 4. Only the client id is logged.
+
+Leave `NODE_BOOTSTRAP_CALLBACK_URL` unset and nothing changes: the node boots exactly
+as it did before and you mint the key by hand, as the local bench does.
+
+The callback URL must be reachable from inside the container, which on Cloudflare
+Containers means the node's own public hostname (outbound internet is on by default)
+and on the bench means the host. The image's `curl` exists for this and nothing else.
 
 ## Running envoy subcommands in a live node
 
@@ -70,6 +105,9 @@ check below exists to prevent that.
   for this node and NODE_BOOTSTRAP is not set`. This is the guard against a typo in
   `LITESTREAM_PATH` quietly starting a brand new node under someone else's slug.
 - `LITESTREAM_BUCKET`, `LITESTREAM_PATH` or `LITESTREAM_ENDPOINT` missing: exit 1.
+- `NODE_BOOTSTRAP_CALLBACK_URL` is set and the callback fails every attempt: exit 1.
+  The node would otherwise serve, and replicate, a database whose only API key was
+  printed into a log line nobody read.
 
 `NODE_BOOTSTRAP=1` is for the first boot of a new node only. Leaving it set turns every
 one of these failures back into silent data loss.
@@ -100,6 +138,15 @@ bind-mounts the files instead of passing them through the environment.
 | `LITESTREAM_ACCESS_KEY_ID` | none, required | Read by Litestream itself, never named in `litestream.yml`. |
 | `LITESTREAM_SECRET_ACCESS_KEY` | none, required | As above. |
 | `NODE_BOOTSTRAP` | `0` | `1` allows the node to start with an empty prefix. First boot only. |
+
+### Bootstrap callback
+
+Both are read on the bootstrap path only and ignored on every other boot.
+
+| Variable | Required | What it is |
+| --- | --- | --- |
+| `NODE_BOOTSTRAP_CALLBACK_URL` | no | Where to POST the node's first API key, from inside the container. Unset means the old behaviour: no key is minted and no request is made. Set it and a failed callback is fatal. See [The bootstrap callback](#the-bootstrap-callback). |
+| `NODE_BOOTSTRAP_TOKEN` | with the URL | Sent as `Authorization: Bearer`. A per-bootstrap random value, so a leaked one authorises nothing after the node is up. Missing while the URL is set: exit 1. |
 
 The entrypoint applies the `LITESTREAM_REGION` default before exec'ing Litestream
 because Litestream expands `${VAR}` in its config with Go's `os.Expand` and has no
