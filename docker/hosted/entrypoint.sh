@@ -241,7 +241,7 @@ bootstrap_callback() {
     log "step 3b/4 minted api key client_id=${_client_id} (secret withheld)"
 
     printf '{"slug":"%s","client_id":"%s","client_secret":"%s"}\n' \
-        "$LITESTREAM_PATH" "$_client_id" "$_client_secret" > "$_body"
+        "${NODE_SLUG:-$LITESTREAM_PATH}" "$_client_id" "$_client_secret" > "$_body"
 
     # -K keeps the bearer token and the body out of /proc/*/cmdline.
     {
