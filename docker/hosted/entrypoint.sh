@@ -237,9 +237,9 @@ bootstrap_callback() {
         echo "data-binary = \"@${_body}\""
         echo "silent"
         echo "show-error"
-        echo "fail"
         echo "max-time = 30"
         echo "output = \"/dev/null\""
+        echo "write-out = \"%{http_code}\""
     } > "$_curlrc"
 
     # One attempt plus five retries, backing off 2, 4, 8, 16, 32 seconds: a minute of
@@ -249,15 +249,22 @@ bootstrap_callback() {
     _backoff=2
     _ok=0
 
+    # Only a 2xx counts. `--fail` alone would let a redirect through as success (curl
+    # does not follow it here, and 3xx is not an error to --fail), so the status code
+    # is checked explicitly instead.
     while :; do
-        if curl -K "$_curlrc" "$NODE_BOOTSTRAP_CALLBACK_URL"; then
-            _ok=1
-            break
-        fi
+        _code="$(curl -K "$_curlrc" "$NODE_BOOTSTRAP_CALLBACK_URL" 2>/dev/null || true)"
+
+        case "$_code" in
+            2[0-9][0-9])
+                _ok=1
+                break
+                ;;
+        esac
 
         [ "$_attempt" -lt "$_attempts" ] || break
 
-        log "step 3b/4 callback attempt ${_attempt}/${_attempts} to ${NODE_BOOTSTRAP_CALLBACK_URL} failed; retrying in ${_backoff}s"
+        log "step 3b/4 callback attempt ${_attempt}/${_attempts} to ${NODE_BOOTSTRAP_CALLBACK_URL} failed (http ${_code:-none}); retrying in ${_backoff}s"
 
         sleep "$_backoff"
 
@@ -269,7 +276,16 @@ bootstrap_callback() {
 
     umask 022
 
-    [ "$_ok" = 1 ] || die "bootstrap callback to ${NODE_BOOTSTRAP_CALLBACK_URL} failed ${_attempts} times; refusing to serve a node whose API key nobody holds"
+    if [ "$_ok" != 1 ]; then
+        # apikey:create has already created the database, and nothing has replicated it
+        # yet (litestream starts in step 4). Leaving it on disk would make the next boot
+        # of this container, or of a VPS with a volume, take the existing-database path
+        # and serve a node whose only key was never delivered. Remove it so the next
+        # boot is a clean bootstrap again.
+        rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm"
+
+        die "bootstrap callback to ${NODE_BOOTSTRAP_CALLBACK_URL} failed ${_attempts} times; database discarded, refusing to serve a node whose API key nobody holds"
+    fi
 
     log "step 3b/4 callback accepted by ${NODE_BOOTSTRAP_CALLBACK_URL}"
 }
