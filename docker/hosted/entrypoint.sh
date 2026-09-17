@@ -108,6 +108,11 @@ if [ -z "${TRISA_WEB_AUTH_KEYS-}" ] && [ -f "$SECRETS_DIR/jwt.pem" ]; then
     export TRISA_WEB_AUTH_KEYS
 fi
 
+# The signing key is not optional: without TRISA_WEB_AUTH_KEYS Envoy generates a
+# volatile RSA key at boot, and every container replacement would then invalidate the
+# gateway's access and refresh tokens even though the database restored perfectly.
+[ -n "${TRISA_WEB_AUTH_KEYS-}" ] || die "no JWT signing key: set NODE_JWT_KEY_B64 and NODE_JWT_KEY_ID, or bind-mount a key and set TRISA_WEB_AUTH_KEYS"
+
 # `docker exec` inherits the container's configured environment, not what this script
 # exported, so `envoy apikey:create` inside a running node would fail with "specify
 # certificates path". Leave the exports on disk so an operator can source them:
