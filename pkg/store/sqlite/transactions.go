@@ -990,9 +990,19 @@ func (p *PreparedTransaction) AddCounterparty(in *models.Counterparty, auditLog 
 		// Lookup the counterparty record by unique endpoint information
 		if err = in.Scan(p.tx.QueryRow(lookupCounterpartyCommonNameSQL, sql.Named("commonName", in.CommonName))); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return dberr.ErrNotFound
+				// NOTE: the counterparty is known by endpoint information only (e.g.
+				// a TRP peer that has just made first contact), so create the record
+				// the same way an unsynced TRISA peer is created above.
+				in.ID = ulid.MakeSecure()
+				in.Created = time.Now()
+				in.Modified = in.Created
+
+				if _, err = p.tx.Exec(createCounterpartySQL, in.Params()...); err != nil {
+					return fmt.Errorf("unable to create counterparty with common name: %w", dbe(err))
+				}
+			} else {
+				return fmt.Errorf("unable to lookup counterparty by common name: %w", dbe(err))
 			}
-			return fmt.Errorf("unable to lookup counterparty by common name: %w", err)
 		}
 	default:
 		// In this case, we're pretty sure the counterparty is not in the database
