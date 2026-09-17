@@ -20,6 +20,7 @@ import (
 	"github.com/trisacrypto/envoy/pkg/enum"
 	"github.com/trisacrypto/envoy/pkg/postman"
 	"github.com/trisacrypto/envoy/pkg/store/models"
+	"github.com/trisacrypto/envoy/pkg/trp/callback"
 	"github.com/trisacrypto/trisa/pkg/openvasp/client"
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
 	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
@@ -42,6 +43,8 @@ const (
 var (
 	ErrNoTRPEndpoint        = errors.New("counterparty does not have a trp endpoint")
 	ErrNoBeneficiaryAddress = errors.New("cannot approve a trp transfer without a beneficiary payment address")
+	ErrNoApprovalCallback   = errors.New("the counterparty did not supply a confirmation callback when it approved this transfer, so it cannot be completed over trp")
+	ErrNoTransactionID      = errors.New("cannot complete a trp transfer without an on-chain transaction id")
 )
 
 // SendTRP posts an outgoing travel rule inquiry to the counterparty's TRP endpoint,
@@ -61,7 +64,7 @@ func (s *Server) SendTRP(ctx context.Context, p *postman.TRPPacket) (err error) 
 
 	envelopeID := p.EnvelopeID().String()
 
-	inquiry.Callback = s.trpCallback(endpoint.Scheme, envelopeID)
+	inquiry.Callback = s.trpCallback(endpoint.Scheme, envelopeID, callback.PurposeResolve)
 	inquiry.Info = &trp.Info{
 		Address:           endpoint.String(),
 		APIVersion:        trpAPIVersion,
@@ -109,13 +112,13 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 	resolution := &trp.Resolution{}
 
 	// A completed transfer is reported with a TRP confirmation to the approval's own
-	// callback, not with a second approval; confirmations are not implemented yet, so
-	// TransferCompleted deliberately falls through to the error below.
+	// callback rather than with a second resolution; SendEnvelope routes those to
+	// SendTRPConfirmation, so TransferCompleted never reaches this switch.
 	switch state := p.Out.Envelope.TransferState(); state {
 	case trisa.TransferAccepted:
 		resolution.Approved = &trp.Approval{
 			Address:  postman.BeneficiaryAddress(p.Out.Envelope),
-			Callback: s.trpCallback(endpoint.Scheme, envelopeID),
+			Callback: s.trpCallback(endpoint.Scheme, envelopeID, callback.PurposeConfirm),
 		}
 
 		// TRP requires a payment address on an approval and there is no sensible
@@ -167,6 +170,106 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 	return s.storeTRPEnvelopes(&p.Packet, "Server.SendTRPResolution()")
 }
 
+// SendTRPConfirmation reports a completed outbound transfer to the beneficiary, posting
+// a TRP confirmation with the on-chain transaction id to the callback the beneficiary
+// named in its approval, then records an echo of it as the incoming message so that the
+// transaction reaches completed locally.
+func (s *Server) SendTRPConfirmation(ctx context.Context, p *postman.TRISAPacket) (err error) {
+	envelopeID := p.EnvelopeID()
+
+	var id uuid.UUID
+
+	if id, err = uuid.Parse(envelopeID); err != nil {
+		return fmt.Errorf("could not parse the envelope id of the transfer: %w", err)
+	}
+
+	// TRP names the confirmation endpoint in the approval, and there is no convention to
+	// fall back on: a transfer approved before this node recorded approvals, or approved
+	// out of band, simply cannot be confirmed over the wire.
+	var callbackURL string
+
+	if callbackURL, err = s.storedTRPApprovalCallback(ctx, id); err != nil {
+		p.Log.Warn().Err(err).Msg("could not read the trp approval callback stored with the resolution")
+
+		return ErrNoApprovalCallback
+	}
+
+	if callbackURL == "" {
+		return ErrNoApprovalCallback
+	}
+
+	confirmation := &trp.Confirmation{
+		TXID: transactionID(p.Out.Envelope),
+		Info: &trp.Info{
+			Address:           callbackURL,
+			APIVersion:        trpAPIVersion,
+			RequestIdentifier: envelopeID,
+		},
+	}
+
+	if err = confirmation.Validate(); err != nil {
+		p.Log.Warn().Err(err).Msg("could not create a valid trp confirmation")
+
+		return ErrNoTransactionID
+	}
+
+	var trpc *client.Client
+
+	if trpc, err = client.New(); err != nil {
+		return err
+	}
+
+	p.Log.Debug().Str("callback", callbackURL).Msg("sending outgoing trp confirmation")
+
+	if err = trpc.Confirm(ctx, confirmation); err != nil {
+		p.Log.Error().Err(err).Str("callback", callbackURL).Msg("could not send trp confirmation to counterparty")
+
+		return ErrUnavailable
+	}
+
+	if err = p.EchoIncoming(); err != nil {
+		return err
+	}
+
+	return s.storeTRPEnvelopes(&p.Packet, "Server.SendTRPConfirmation()")
+}
+
+// transactionID reads the on-chain transaction identifier out of the payload the
+// compliance user completed the transfer with.
+func transactionID(env *envelope.Envelope) string {
+	if env == nil {
+		return ""
+	}
+
+	payload, err := env.Payload()
+
+	if err != nil || payload == nil || payload.Transaction == nil {
+		return ""
+	}
+
+	txn := &generic.Transaction{}
+
+	if err = payload.Transaction.UnmarshalTo(txn); err != nil {
+		return ""
+	}
+
+	return txn.Txid
+}
+
+// storedTRPApprovalCallback recovers the confirmation callback the beneficiary supplied
+// in its approval, which postman.PayloadFromResolution records on the generic.TRP message
+// of the incoming envelope, so the sealed envelope has to be fetched and decrypted to
+// read it back.
+func (s *Server) storedTRPApprovalCallback(ctx context.Context, envelopeID uuid.UUID) (_ string, err error) {
+	var msg *generic.TRP
+
+	if msg, err = s.storedTRPMessage(ctx, envelopeID); err != nil || msg == nil {
+		return "", err
+	}
+
+	return msg.GetApproved().GetCallback(), nil
+}
+
 // resolutionCallback determines where the local compliance decision for an inbound
 // TRP transfer should be posted.
 //
@@ -195,12 +298,8 @@ func (s *Server) resolutionCallback(ctx context.Context, p *postman.TRISAPacket,
 	}
 
 	if stored != "" {
-		if callback, err = url.Parse(stored); err != nil {
-			return nil, fmt.Errorf("could not parse the trp callback supplied by the counterparty: %w", err)
-		}
-
-		if path := strings.TrimSuffix(callback.Path, "/"); strings.HasSuffix(path, trpTransfersPath+"/"+envelopeID) {
-			callback.Path = path + "/" + trpResolvePath
+		if callback, err = resolveCallbackPath(stored, envelopeID); err != nil {
+			return nil, err
 		}
 
 		p.Log.Info().Str("callback", callback.String()).Str("callback_source", "inquiry").Msg("resolving trp transfer to the callback supplied by the counterparty")
@@ -220,6 +319,26 @@ func (s *Server) resolutionCallback(ctx context.Context, p *postman.TRISAPacket,
 	return &uri, nil
 }
 
+// resolveCallbackPath turns the callback a counterparty supplied with its inquiry into
+// the URL its resolution should be posted to.
+//
+// The stored callback is used verbatim, as the TRP specification describes it as the full
+// URL. The one exception is the convention older Envoy nodes follow: they supply a base
+// callback of /transfers/<envelope id> and serve the resolution beneath it at /resolve.
+// Only that exact shape gets /resolve appended — in particular the token bearing
+// callbacks this node now hands out (.../resolve/<token>) are left alone.
+func resolveCallbackPath(stored, envelopeID string) (callback *url.URL, err error) {
+	if callback, err = url.Parse(stored); err != nil {
+		return nil, fmt.Errorf("could not parse the trp callback supplied by the counterparty: %w", err)
+	}
+
+	if path := strings.TrimSuffix(callback.Path, "/"); strings.HasSuffix(path, trpTransfersPath+"/"+envelopeID) {
+		callback.Path = path + "/" + trpResolvePath
+	}
+
+	return callback, nil
+}
+
 // storedTRPCallback recovers the callback URL that the inbound inquiry for this
 // transfer supplied. postman.PayloadFromInquiry stores it on the generic.TRP message
 // of the incoming payload, so the sealed incoming envelope has to be fetched and
@@ -229,36 +348,48 @@ func (s *Server) resolutionCallback(ctx context.Context, p *postman.TRISAPacket,
 // not arrive over TRP (it carries a generic.Transaction instead) or the inquiry
 // carried no callback.
 func (s *Server) storedTRPCallback(ctx context.Context, envelopeID uuid.UUID) (_ string, err error) {
+	var msg *generic.TRP
+
+	if msg, err = s.storedTRPMessage(ctx, envelopeID); err != nil || msg == nil {
+		return "", err
+	}
+
+	return msg.GetInquiry().GetCallback(), nil
+}
+
+// storedTRPMessage fetches and decrypts the latest incoming envelope of a transfer and
+// returns the TRP message it carries. A nil message with no error means the envelope did
+// not arrive over TRP (it carries a generic.Transaction instead).
+func (s *Server) storedTRPMessage(ctx context.Context, envelopeID uuid.UUID) (_ *generic.TRP, err error) {
 	var env *models.SecureEnvelope
 
 	if env, err = s.store.LatestSecureEnvelope(ctx, envelopeID, enum.DirectionIncoming); err != nil {
-		return "", fmt.Errorf("could not retrieve incoming envelope: %w", err)
+		return nil, fmt.Errorf("could not retrieve incoming envelope: %w", err)
 	}
 
 	var decrypted *envelope.Envelope
 
 	if decrypted, err = s.Decrypt(env); err != nil {
-		return "", fmt.Errorf("could not decrypt incoming envelope: %w", err)
+		return nil, fmt.Errorf("could not decrypt incoming envelope: %w", err)
 	}
 
 	var payload *trisa.Payload
 
 	if payload, err = decrypted.Payload(); err != nil {
-		return "", fmt.Errorf("could not read incoming payload: %w", err)
+		return nil, fmt.Errorf("could not read incoming payload: %w", err)
 	}
 
 	if payload.Transaction == nil {
-		return "", nil
+		return nil, nil
 	}
 
 	trpmsg := &generic.TRP{}
 
 	if err = payload.Transaction.UnmarshalTo(trpmsg); err != nil {
-		// Not a TRP payload, so there is no stored callback to report.
-		return "", nil
+		return nil, nil
 	}
 
-	return trpmsg.GetInquiry().GetCallback(), nil
+	return trpmsg, nil
 }
 
 // storeTRPEnvelopes seals both halves of a TRP packet with the node's storage key and
@@ -293,28 +424,14 @@ func (s *Server) storeTRPEnvelopes(p *postman.Packet, notes string) (err error) 
 	return nil
 }
 
-// trpCallback builds the URL that a counterparty should post resolutions and
-// confirmations for this transfer back to. The scheme mirrors the one used to reach
-// the counterparty so plaintext lab deployments stay plaintext in both directions.
+// trpCallback builds the URL that a counterparty should post the resolution or the
+// confirmation for this transfer back to. The scheme mirrors the one used to reach the
+// counterparty so plaintext lab deployments stay plaintext in both directions.
 //
-// Multi-tenant deployments configure TRISA_TRP_ENDPOINT as host/<prefix> so that a
-// path-routing proxy in front of a single public hostname can find this node again;
-// the prefix is carried into every callback.
-func (s *Server) trpCallback(scheme, envelopeID string) string {
-	endpoint := strings.TrimPrefix(strings.TrimPrefix(s.conf.TRP.Endpoint, "https://"), "http://")
-	host, prefix, _ := strings.Cut(endpoint, "/")
-
-	uri := &url.URL{
-		Scheme: scheme,
-		Host:   host,
-		Path:   trpTransfersPath + "/" + envelopeID,
-	}
-
-	if prefix != "" {
-		uri.Path = "/" + strings.TrimSuffix(prefix, "/") + uri.Path
-	}
-
-	return uri.String()
+// The URL carries a per-transfer capability token, because the envelope id it also
+// carries is not a secret: see pkg/trp/callback.
+func (s *Server) trpCallback(scheme, envelopeID, purpose string) string {
+	return callback.CallbackURL(s.conf.TRP.Endpoint, scheme, envelopeID, purpose, s.conf.TRP.DecodeCallbackKey())
 }
 
 // trpEndpoint resolves the URL that TRP requests for a counterparty should be sent

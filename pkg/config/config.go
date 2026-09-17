@@ -116,12 +116,14 @@ type DirectorySyncConfig struct {
 
 type TRPConfig struct {
 	MTLSConfig
-	Maintenance bool   `env:"TRISA_MAINTENANCE" desc:"if true sets the trp node to maintenance mode; inherited from parent"`
-	Endpoint    string `env:"TRISA_TRP_ENDPOINT" desc:"trp endpoint as assigned to the mTLS certificates for the trp node"`
-	Enabled     bool   `default:"true" desc:"if false, the trp server will not be run"`
-	BindAddr    string `default:":8200" split_words:"true" desc:"the ip address and port to bind the trp server on"`
-	UseMTLS     bool   `default:"true" split_words:"true" desc:"if true the trp server will require mTLS authentication"`
-	Identity    TRPIdentityConfig
+	Maintenance                   bool   `env:"TRISA_MAINTENANCE" desc:"if true sets the trp node to maintenance mode; inherited from parent"`
+	Endpoint                      string `env:"TRISA_TRP_ENDPOINT" desc:"trp endpoint as assigned to the mTLS certificates for the trp node"`
+	Enabled                       bool   `default:"true" desc:"if false, the trp server will not be run"`
+	BindAddr                      string `default:":8200" split_words:"true" desc:"the ip address and port to bind the trp server on"`
+	UseMTLS                       bool   `default:"true" split_words:"true" desc:"if true the trp server will require mTLS authentication"`
+	CallbackKey                   string `split_words:"true" desc:"hex encoded 32 byte key used to derive per-transfer callback tokens; required when the TRP server is enabled"`
+	AllowUnauthenticatedCallbacks bool   `default:"false" split_words:"true" desc:"accept legacy tokenless resolve/confirm callbacks (lab and migration use only)"`
+	Identity                      TRPIdentityConfig
 }
 
 type TRPIdentityConfig struct {
@@ -347,6 +349,22 @@ func (c *TRPConfig) Validate() error {
 			return errors.New("invalid configuration: missing bind address")
 		}
 
+		// Every resolve and confirm callback this node hands out carries a token
+		// derived from this key; without it the callbacks would be open to anyone who
+		// can guess or observe a transfer's envelope id.
+		if c.CallbackKey == "" {
+			return errors.New("invalid configuration: missing trp callback key")
+		}
+
+		key, err := hex.DecodeString(strings.ToLower(c.CallbackKey))
+		if err != nil {
+			return fmt.Errorf("invalid configuration: could not decode trp callback key: %w", err)
+		}
+
+		if len(key) != 32 {
+			return errors.New("invalid configuration: trp callback key must be 32 bytes")
+		}
+
 		// If use mTLS is specified then a path to the certificates must be available
 		if c.UseMTLS {
 			if c.Certs == "" {
@@ -355,6 +373,17 @@ func (c *TRPConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+// DecodeCallbackKey returns the raw bytes of the hex encoded callback key, or nil if
+// no key is configured (mirrors WebhookConfig.DecodeAuthKey).
+func (c TRPConfig) DecodeCallbackKey() []byte {
+	if c.CallbackKey == "" {
+		return nil
+	}
+
+	key, _ := hex.DecodeString(strings.ToLower(c.CallbackKey))
+	return key
 }
 
 func (c *SunriseConfig) InviteURL() *url.URL {

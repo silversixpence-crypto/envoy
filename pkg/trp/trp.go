@@ -22,6 +22,7 @@ import (
 	"github.com/trisacrypto/envoy/pkg/config"
 	"github.com/trisacrypto/envoy/pkg/store"
 	"github.com/trisacrypto/envoy/pkg/trisa/network"
+	"github.com/trisacrypto/envoy/pkg/webhook"
 	"github.com/trisacrypto/trisa/pkg/openvasp/extensions/discoverability"
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
 	"github.com/trisacrypto/trisa/pkg/trisa/mtls"
@@ -51,6 +52,7 @@ type Server struct {
 	router     *gin.Engine
 	url        *url.URL
 	trisa      network.Network
+	webhook    webhook.Handler
 	version    discoverability.Version
 	extensions discoverability.Extensions
 	identity   trp.Identity
@@ -59,15 +61,16 @@ type Server struct {
 	ready      bool
 }
 
-func New(conf config.Config, store store.Store, network network.Network) (s *Server, err error) {
+func New(conf config.Config, store store.Store, network network.Network, webhook webhook.Handler) (s *Server, err error) {
 	if err = conf.TRP.Validate(); err != nil {
 		return nil, err
 	}
 
 	s = &Server{
-		conf:  conf,
-		store: store,
-		trisa: network,
+		conf:    conf,
+		store:   store,
+		trisa:   network,
+		webhook: webhook,
 	}
 
 	// If not enabled, return just the server stub
@@ -227,8 +230,8 @@ func (s *Server) setURL(addr net.Addr) {
 
 // Debug returns a server that uses the specified http server instead of creating one.
 // This function is primarily used to create test servers easily.
-func Debug(conf config.Config, store store.Store, network network.Network, srv *http.Server) (s *Server, err error) {
-	if s, err = New(conf, store, network); err != nil {
+func Debug(conf config.Config, store store.Store, network network.Network, webhook webhook.Handler, srv *http.Server) (s *Server, err error) {
+	if s, err = New(conf, store, network, webhook); err != nil {
 		return nil, err
 	}
 

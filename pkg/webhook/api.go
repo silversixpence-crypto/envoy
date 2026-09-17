@@ -23,6 +23,7 @@ type Request struct {
 	TransactionID uuid.UUID         `json:"transaction_id"`
 	Timestamp     string            `json:"timestamp"`
 	Counterparty  *api.Counterparty `json:"counterparty"`
+	Protocol      string            `json:"protocol,omitempty"`
 	HMAC          string            `json:"hmac_signature,omitempty"`
 	PKS           string            `json:"public_key_signature,omitempty"`
 	TransferState string            `json:"transfer_state,omitempty"`
@@ -30,16 +31,28 @@ type Request struct {
 	Payload       *Payload          `json:"payload,omitempty"`
 }
 
+// The travel rule protocol an incoming message arrived over. The field is optional so
+// that callbacks written against earlier versions of the API keep working.
+const (
+	ProtocolTRISA = "trisa"
+	ProtocolTRP   = "trp"
+)
+
 // Payload is a denormalized representation of a TRISA payload that includes
 // type-specific data structures. The payload should always have an identity IVMS101
 // payload and a sent at timestamp. It will have either a pending message or a
 // transaction but not both. If payload is in an envelope with an accepted or completed
 // transfer state it will have a received at timestamp as well.
+// TRP payloads carry both: the TRP message itself is exposed on TRP so that a callback
+// can read the wire level detail (the inquiry callback, an approval address), while
+// Transaction holds the reference transaction extracted from it so that callbacks which
+// only understand TRISA payloads keep working.
 type Payload struct {
 	Identity    *ivms101.IdentityPayload `json:"identity"`
 	Pending     *generic.Pending         `json:"pending,omitempty"`
 	Transaction *generic.Transaction     `json:"transaction,omitempty"`
 	Sunrise     *generic.Sunrise         `json:"sunrise,omitempty"`
+	TRP         *generic.TRP             `json:"trp,omitempty"`
 	SentAt      string                   `json:"sent_at"`
 	ReceivedAt  string                   `json:"received_at,omitempty"`
 }
@@ -62,6 +75,7 @@ const (
 	transactionPBType = "type.googleapis.com/trisa.data.generic.v1beta1.Transaction"
 	pendingPBType     = "type.googleapis.com/trisa.data.generic.v1beta1.Pending"
 	sunrisePBType     = "type.googleapis.com/trisa.data.generic.v1beta1.Sunrise"
+	trpPBType         = "type.googleapis.com/trisa.data.generic.v1beta1.TRP"
 )
 
 // Add a TRISA protocol buffer payload to the webhook request, unmarshaling it into its
@@ -100,6 +114,15 @@ func (r *Request) AddPayload(payload *trisa.Payload) (err error) {
 		if err = payload.Transaction.UnmarshalTo(r.Payload.Sunrise); err != nil {
 			return fmt.Errorf("could not unmarshal sunrise payload: %s", err)
 		}
+	case trpPBType:
+		r.Payload.TRP = &generic.TRP{}
+		if err = payload.Transaction.UnmarshalTo(r.Payload.TRP); err != nil {
+			return fmt.Errorf("could not unmarshal trp payload: %s", err)
+		}
+
+		// Every TRP message Envoy creates carries the reference transaction, so the
+		// callback sees the same shape it would for a TRISA transfer.
+		r.Payload.Transaction = r.Payload.TRP.GetTransaction()
 	default:
 		return fmt.Errorf("unknown transaction type %q", payload.Transaction.TypeUrl)
 	}
@@ -179,5 +202,5 @@ func (p *Payload) Proto() (payload *trisa.Payload, err error) {
 }
 
 func (p *Payload) IsZero() bool {
-	return p.Identity == nil && p.Pending == nil && p.Transaction == nil && p.SentAt == "" && p.ReceivedAt == ""
+	return p.Identity == nil && p.Pending == nil && p.Transaction == nil && p.TRP == nil && p.SentAt == "" && p.ReceivedAt == ""
 }

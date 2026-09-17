@@ -176,6 +176,16 @@ func (i *Incoming) WebhookRequest() *webhook.Request {
 	return request
 }
 
+// WebhookRequestFor is WebhookRequest with the travel rule protocol the message arrived
+// over recorded on it, so that a callback serving a node that speaks both TRISA and TRP
+// can tell which rail it is answering without inspecting the payload.
+func (i *Incoming) WebhookRequestFor(protocol string) *webhook.Request {
+	request := i.WebhookRequest()
+	request.Protocol = protocol
+
+	return request
+}
+
 // StatusFromTransferState determines what the status should be based on the incoming
 // message transfer state. For example, if the incoming transfer state is accepted, then
 // the Transfer can be marked as completed.

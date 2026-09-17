@@ -1436,10 +1436,12 @@ func (s *Server) CompleteTransaction(c *gin.Context) {
 		return
 	}
 
-	// TODO: Handle Sunrise and TRP Counterparties
-	if packet.Counterparty.Protocol != enum.ProtocolTRISA {
+	// TODO: Handle Sunrise Counterparties
+	switch packet.Counterparty.Protocol {
+	case enum.ProtocolTRISA, enum.ProtocolTRP:
+	default:
 		c.Error(fmt.Errorf("%s protcol not supported for complete transaction", packet.Counterparty.Protocol))
-		c.JSON(http.StatusBadRequest, api.Error("only the TRISA protocol is supported for this endpoint at this time"))
+		c.JSON(http.StatusBadRequest, api.Error("only the TRISA and TRP protocols are supported for this endpoint at this time"))
 		return
 	}
 
@@ -1462,6 +1464,14 @@ func (s *Server) CompleteTransaction(c *gin.Context) {
 	// NOTE: SendEnvelope handles storing the incoming and outgoing envelopes in the database
 	if err = s.SendEnvelope(ctx, packet); err != nil {
 		c.Error(err)
+
+		// A TRP transfer that cannot be confirmed is a problem with the request or the
+		// transfer's history rather than a failure to reach the counterparty.
+		if errors.Is(err, ErrNoApprovalCallback) || errors.Is(err, ErrNoTransactionID) {
+			c.JSON(http.StatusUnprocessableEntity, api.Error(err))
+			return
+		}
+
 		c.JSON(http.StatusInternalServerError, api.Error("unable to send transfer to remote counterparty"))
 		return
 	}

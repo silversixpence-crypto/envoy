@@ -8,8 +8,10 @@ package trp
 // transaction the callback refers to.
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -17,8 +19,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/trisacrypto/envoy/pkg/enum"
 	"github.com/trisacrypto/envoy/pkg/logger"
+	"github.com/trisacrypto/envoy/pkg/postman"
 	"github.com/trisacrypto/envoy/pkg/store/models"
+	"github.com/trisacrypto/envoy/pkg/trp/callback"
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
+	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
+	"github.com/trisacrypto/trisa/pkg/trisa/envelope"
+	"github.com/trisacrypto/trisa/pkg/trisa/keys"
 )
 
 var (
@@ -40,6 +47,12 @@ func (s *Server) Resolve(c *gin.Context) {
 
 	if envelopeID, err = uuid.Parse(c.Param("envelopeID")); err != nil {
 		c.AbortWithError(http.StatusNotFound, ErrUnknownTransfer)
+		return
+	}
+
+	// The capability token is checked before anything touches the database so that an
+	// unauthorized caller cannot use response timing to probe for envelope ids.
+	if !s.authorizeCallback(c, envelopeID, callback.PurposeResolve) {
 		return
 	}
 
@@ -144,6 +157,17 @@ func (s *Server) Resolve(c *gin.Context) {
 		return
 	}
 
+	// Record the decision as an incoming secure envelope. Beyond the audit trail this is
+	// load bearing for approvals: the confirmation this node sends when the transfer
+	// completes has to go to the callback named in the approval, and this envelope is the
+	// only place it is kept. A failure here is logged rather than fatal, because the
+	// status change is the part the counterparty is waiting on.
+	if status != enum.StatusPending {
+		if err = s.storeResolution(ctx, db, envelopeID, counterparty, in); err != nil {
+			log.Warn().Err(err).Msg("could not store the incoming envelope for a trp resolution")
+		}
+	}
+
 	transaction.Status = status
 	transaction.LastUpdate = sql.NullTime{Valid: true, Time: time.Now()}
 
@@ -163,4 +187,72 @@ func (s *Server) Resolve(c *gin.Context) {
 
 	// A 204 should be sent in response to a transfer inquiry resolution.
 	c.Status(http.StatusNoContent)
+}
+
+// storeResolution records an asynchronous resolution as an incoming secure envelope,
+// built on the payload of the inquiry this node sent, and sealed with the node's own
+// storage key because TRP messages are plaintext on the wire.
+func (s *Server) storeResolution(ctx context.Context, db models.PreparedTransaction, envelopeID uuid.UUID, counterparty *models.Counterparty, in *trp.Resolution) (err error) {
+	var base *trisa.Payload
+
+	if base, err = s.latestPayload(ctx, envelopeID); err != nil {
+		return err
+	}
+
+	var payload *trisa.Payload
+
+	if payload, err = postman.PayloadFromResolution(base, in); err != nil {
+		return err
+	}
+
+	transferState := trisa.TransferAccepted
+
+	if in.Rejected != "" {
+		transferState = trisa.TransferRejected
+	}
+
+	var env *envelope.Envelope
+
+	opts := []envelope.Option{
+		envelope.WithEnvelopeID(envelopeID.String()),
+		envelope.WithTransferState(transferState),
+	}
+
+	if env, err = envelope.New(payload, opts...); err != nil {
+		return fmt.Errorf("could not create incoming trp resolution envelope: %w", err)
+	}
+
+	var storageKey keys.PublicKey
+
+	if storageKey, err = s.trisa.StorageKey("", counterparty.CommonName); err != nil {
+		return fmt.Errorf("could not get storage key for trp resolution: %w", err)
+	}
+
+	if env, _, err = env.Encrypt(); err != nil {
+		return fmt.Errorf("could not encrypt trp resolution: %w", err)
+	}
+
+	if env, _, err = env.Seal(envelope.WithSealingKey(storageKey)); err != nil {
+		return fmt.Errorf("could not seal trp resolution: %w", err)
+	}
+
+	model := env.Proto()
+	validHMAC, _ := env.ValidateHMAC()
+	timestamp, _ := env.Timestamp()
+
+	return db.AddEnvelope(&models.SecureEnvelope{
+		EnvelopeID:    envelopeID,
+		Direction:     enum.DirectionIncoming,
+		Remote:        sql.NullString{Valid: counterparty.CommonName != "", String: counterparty.CommonName},
+		IsError:       false,
+		EncryptionKey: model.EncryptionKey,
+		HMACSecret:    model.HmacSecret,
+		ValidHMAC:     sql.NullBool{Valid: true, Bool: validHMAC},
+		PublicKey:     sql.NullString{Valid: model.PublicKeySignature != "", String: model.PublicKeySignature},
+		TransferState: int32(model.TransferState),
+		Timestamp:     timestamp,
+		Envelope:      model,
+	}, &models.ComplianceAuditLog{
+		ChangeNotes: sql.NullString{Valid: true, String: "Server.Resolve()"},
+	})
 }

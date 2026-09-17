@@ -130,7 +130,7 @@ func New(conf config.Config) (node *Node, err error) {
 	}
 
 	// Create the TRP server
-	if node.trp, err = trp.New(conf, node.store, node.network); err != nil {
+	if node.trp, err = trp.New(conf, node.store, node.network, node.webhook); err != nil {
 		return nil, err
 	}
 

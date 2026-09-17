@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -124,6 +125,21 @@ func (h *Webhook) Callback(ctx context.Context, out *Request) (in *Reply, err er
 		}
 
 		req.Header.Add("Authorization", auth)
+
+		// The Authorization header above signs headers only, so a receiver cannot tell
+		// whether the body it read is the body we sent. These two headers sign the exact
+		// bytes on the wire in the widely used "sha256=<hex>" form, which lets a
+		// callback verify the payload and reject replays using the timestamp.
+		//
+		// The key is the configured secret string itself, not its hex decoding: webhook
+		// receivers outside Envoy take the shared secret as an opaque string and feed it
+		// straight into their HMAC, so signing with the same bytes means the operator
+		// pastes one value into both systems. The Authorization header keeps Envoy's own
+		// decoded-key scheme.
+		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+
+		req.Header.Add("X-Envoy-Timestamp", timestamp)
+		req.Header.Add("X-Envoy-Signature", Signature([]byte(h.conf.AuthKeySecret), timestamp, data.Bytes()))
 	}
 
 	// Debug logging for the webhook POST request

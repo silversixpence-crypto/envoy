@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +16,22 @@ import (
 var (
 	ErrInvalidHMACToken = errors.New("invalid authorization hmac token")
 )
+
+// SignaturePrefix identifies the algorithm used in the X-Envoy-Signature header.
+const SignaturePrefix = "sha256="
+
+// Signature computes the value of the X-Envoy-Signature header: the HMAC-SHA256 of the
+// request timestamp, a literal ".", and the exact body bytes on the wire. Including the
+// timestamp in the signed message binds it to the signature so a replayed body cannot be
+// paired with a fresh timestamp.
+func Signature(key []byte, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+
+	return SignaturePrefix + hex.EncodeToString(mac.Sum(nil))
+}
 
 // HMAC implements an authorization header to authenticate webhook requests using a
 // similar shared secret mechanism as AWS4-HMAC-SHA256 as defined here:

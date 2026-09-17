@@ -57,8 +57,15 @@ func (s *Server) setupRoutes() error {
 	s.router.POST("/transfers/w/:walletID", VerifyTRPCore, s.Inquiry)
 
 	// TRP Callback Routes
+	//
+	// Every callback this node hands out carries a per-transfer capability token, since
+	// the envelope id on its own is not a secret. The tokenless routes stay registered
+	// for callbacks issued before tokens existed, but they answer 404 unless the node is
+	// configured to allow them (see Server.authorizeCallback).
 	s.router.POST("/transfers/:envelopeID/resolve", VerifyTRPCore, s.Resolve)
+	s.router.POST("/transfers/:envelopeID/resolve/:token", VerifyTRPCore, s.Resolve)
 	s.router.POST("/transfers/:envelopeID/confirm", VerifyTRPCore, s.Confirmation)
+	s.router.POST("/transfers/:envelopeID/confirm/:token", VerifyTRPCore, s.Confirmation)
 
 	return nil
 }

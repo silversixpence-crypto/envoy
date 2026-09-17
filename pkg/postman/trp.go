@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
-	"errors"
 	"fmt"
 	"net/url"
 	"time"
@@ -75,24 +74,98 @@ func ReceiveTRPInquiry(inquiry *trp.Inquiry, mtls *tls.ConnectionState) (packet 
 	return packet, nil
 }
 
-func (p *TRPPacket) Resolve(out *trp.Resolution) (err error) {
-	// TODO: handle accepted and rejected envelopes better!
-	var transferState trisa.TransferState
-	switch {
-	case out.Approved != nil:
-		return errors.New("approved resolution not yet supported")
-	case out.Rejected != "":
-		return errors.New("rejected resolution not yet supported")
-	default:
-		transferState = trisa.TransferPending
+// ReceiveTRPConfirmation records an inbound TRP confirmation (the originator reporting
+// that an approved transfer settled on chain or was canceled) as the incoming half of a
+// packet. A confirmation is acknowledged with an empty 204, so unlike an inquiry the
+// packet has no outgoing message; base is the payload of the last message stored for the
+// transfer, from which the identity and reference transaction are carried over.
+func ReceiveTRPConfirmation(envelopeID uuid.UUID, base *trisa.Payload, in *trp.Confirmation, mtls *tls.ConnectionState) (packet *TRPPacket, err error) {
+	packet = &TRPPacket{
+		Packet: Packet{
+			In:      &Incoming{},
+			Out:     &Outgoing{},
+			request: enum.DirectionIncoming,
+			reply:   enum.DirectionOutgoing,
+		},
+		info:       in.Info,
+		mtls:       mtls,
+		message:    in,
+		envelopeID: envelopeID,
 	}
 
-	// TODO: handle accept and reject envelopes!
-	if p.Out.Envelope, err = p.In.Envelope.Update(p.payload, envelope.WithTransferState(transferState)); err != nil {
-		p.Log.Debug().Err(err).Msg("could not prepare outgoing payload")
-		return fmt.Errorf("could not create outgoing trp resolution envelope: %w", err)
+	// Add parent to submessages
+	packet.In.packet = &packet.Packet
+	packet.Out.packet = &packet.Packet
+
+	if packet.payload, err = PayloadFromConfirmation(base, in); err != nil {
+		return nil, err
 	}
-	return nil
+
+	transferState := trisa.TransferCompleted
+
+	if in.Canceled != "" {
+		transferState = trisa.TransferRejected
+	}
+
+	opts := []envelope.Option{
+		envelope.WithEnvelopeID(envelopeID.String()),
+		envelope.WithTransferState(transferState),
+	}
+
+	if packet.In.Envelope, err = envelope.New(packet.payload, opts...); err != nil {
+		return nil, fmt.Errorf("could not create incoming trp confirmation envelope: %w", err)
+	}
+
+	packet.In.original = packet.In.Envelope.Proto()
+	packet.Packet.resolver = packet
+	return packet, nil
+}
+
+// Resolve prepares the outgoing half of an inbound inquiry from the resolution this node
+// is replying with. An approval and a rejection are terminal decisions and are recorded
+// as such, so that the transaction reaches accepted or rejected through the ordinary
+// Outgoing.UpdateTransaction path; a version-only resolution leaves the transfer pending
+// on the local compliance team.
+func (p *TRPPacket) Resolve(out *trp.Resolution) (err error) {
+	switch {
+	case out.Rejected != "":
+		// A rejection is stored the way TRISA rejections are, as an error envelope, so
+		// that the UI, the API and StatusFromTransferState all treat it identically.
+		reject := &trisa.Error{
+			Code:    trisa.Rejected,
+			Message: out.Rejected,
+			Retry:   false,
+		}
+
+		if p.Out.Envelope, err = envelope.WrapError(reject, envelope.WithEnvelopeID(p.envelopeID.String())); err != nil {
+			p.Log.Debug().Err(err).Msg("could not prepare outgoing rejection")
+			return fmt.Errorf("could not create outgoing trp rejection envelope: %w", err)
+		}
+
+		return nil
+
+	case out.Approved != nil:
+		var payload *trisa.Payload
+
+		if payload, err = PayloadFromResolution(p.payload, out); err != nil {
+			return fmt.Errorf("could not create outgoing trp approval payload: %w", err)
+		}
+
+		if p.Out.Envelope, err = p.In.Envelope.Update(payload, envelope.WithTransferState(trisa.TransferAccepted)); err != nil {
+			p.Log.Debug().Err(err).Msg("could not prepare outgoing payload")
+			return fmt.Errorf("could not create outgoing trp resolution envelope: %w", err)
+		}
+
+		return nil
+
+	default:
+		if p.Out.Envelope, err = p.In.Envelope.Update(p.payload, envelope.WithTransferState(trisa.TransferPending)); err != nil {
+			p.Log.Debug().Err(err).Msg("could not prepare outgoing payload")
+			return fmt.Errorf("could not create outgoing trp resolution envelope: %w", err)
+		}
+
+		return nil
+	}
 }
 
 func (p *TRPPacket) EnvelopeID() uuid.UUID {
@@ -119,7 +192,9 @@ func (p *TRPPacket) Seal(storageKey keys.PublicKey) (err error) {
 		return ErrNoSealingKey
 	}
 
-	if !p.Out.Envelope.IsError() {
+	// A confirmation is acknowledged with an empty 204, so the packet that records one
+	// has no outgoing message to seal.
+	if p.Out.Envelope != nil && !p.Out.Envelope.IsError() {
 		// Ensure the outgoing message has the same encryption key as the incoming!
 		p.Out.StorageKey = storageKey
 		p.Out.SealingKey = storageKey

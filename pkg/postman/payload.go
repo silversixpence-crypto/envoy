@@ -214,3 +214,127 @@ func PayloadFromInquiry(inquiry *trp.Inquiry) (payload *api.Payload, err error) 
 
 	return payload, nil
 }
+
+// PayloadFromResolution builds the payload that records a TRP resolution (an approval or
+// a rejection) as a secure envelope. TRP replies are bare JSON on the wire, so the
+// identity and the reference transaction are carried over from the payload of the
+// inquiry this resolution answers and the decision itself is stored as the TRP message.
+//
+// Storing the approval verbatim matters beyond the audit trail: the confirmation this
+// node later sends has to go to the callback the beneficiary named in its approval, and
+// this envelope is the only place that URL is recorded.
+func PayloadFromResolution(base *api.Payload, res *trp.Resolution) (payload *api.Payload, err error) {
+	if base == nil {
+		return nil, ErrNoTRPPayload
+	}
+
+	msg := &generic.TRP{}
+
+	switch {
+	case res == nil:
+		return nil, ErrNoTRPResolution
+	case res.Rejected != "":
+		msg.Message = &generic.TRP_Rejected{
+			Rejected: &generic.TRPRejected{Rejected: res.Rejected},
+		}
+	case res.Approved != nil:
+		msg.Message = &generic.TRP_Approved{
+			Approved: &generic.TRPApproved{
+				Address:  res.Approved.Address,
+				Callback: res.Approved.Callback,
+			},
+		}
+	default:
+		// A version-only resolution is an acknowledgement rather than a decision;
+		// there is nothing to record beyond the transaction status.
+		return nil, ErrNoTRPResolution
+	}
+
+	copyTRPContext(base, msg)
+
+	payload = &api.Payload{
+		Identity:   base.Identity,
+		SentAt:     base.SentAt,
+		ReceivedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if payload.Transaction, err = anypb.New(msg); err != nil {
+		return nil, err
+	}
+
+	return payload, nil
+}
+
+// PayloadFromConfirmation builds the payload that records a TRP confirmation (the
+// originator reporting the on-chain transaction id, or canceling the transfer) as a
+// secure envelope, carrying the identity and reference transaction over from the payload
+// of the message it follows.
+func PayloadFromConfirmation(base *api.Payload, in *trp.Confirmation) (payload *api.Payload, err error) {
+	if base == nil {
+		return nil, ErrNoTRPPayload
+	}
+
+	msg := &generic.TRP{}
+
+	switch {
+	case in == nil:
+		return nil, ErrNoTRPConfirmation
+	case in.TXID != "":
+		msg.Message = &generic.TRP_Confirmed{
+			Confirmed: &generic.TRPConfirmed{Txid: in.TXID},
+		}
+	case in.Canceled != "":
+		msg.Message = &generic.TRP_Canceled{
+			Canceled: &generic.TRPCanceled{Canceled: in.Canceled},
+		}
+	default:
+		return nil, ErrNoTRPConfirmation
+	}
+
+	copyTRPContext(base, msg)
+
+	// A confirmed transaction has an on-chain identifier that the reference transaction
+	// did not have when the inquiry was made; record it where the UI reads it from.
+	if in.TXID != "" && msg.Transaction != nil {
+		msg.Transaction.Txid = in.TXID
+	}
+
+	payload = &api.Payload{
+		Identity:   base.Identity,
+		SentAt:     base.SentAt,
+		ReceivedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if payload.Transaction, err = anypb.New(msg); err != nil {
+		return nil, err
+	}
+
+	return payload, nil
+}
+
+// copyTRPContext carries the TRP headers and the reference transaction of an earlier
+// message in the transfer onto a new TRP message. The base payload is either a TRP
+// message (this transfer arrived over TRP) or a plain transaction (this node prepared
+// the inquiry through the web API), and both shapes are handled.
+func copyTRPContext(base *api.Payload, msg *generic.TRP) {
+	if base.Transaction == nil {
+		return
+	}
+
+	prev := &generic.TRP{}
+
+	if err := base.Transaction.UnmarshalTo(prev); err == nil {
+		msg.EnvelopeId = prev.EnvelopeId
+		msg.Headers = prev.Headers
+		msg.Extensions = prev.Extensions
+		msg.Transaction = prev.Transaction
+
+		return
+	}
+
+	txn := &generic.Transaction{}
+
+	if err := base.Transaction.UnmarshalTo(txn); err == nil {
+		msg.Transaction = txn
+	}
+}

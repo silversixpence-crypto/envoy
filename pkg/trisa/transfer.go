@@ -351,7 +351,7 @@ func (s *Server) HandleError(ctx context.Context, p *postman.TRISAPacket) (err e
 	// Make a webhook callback if required but the response won't be used since the
 	// error must be echoed back to the recipient. The webhook can respond with 204.
 	if s.WebhookEnabled() {
-		if _, err = s.webhook.Callback(ctx, p.In.WebhookRequest()); err != nil {
+		if _, err = s.webhook.Callback(ctx, p.In.WebhookRequestFor(webhook.ProtocolTRISA)); err != nil {
 			p.Log.Error().Err(err).Msg("could not execute webhook callback")
 		}
 	}
@@ -386,7 +386,7 @@ func (s *Server) HandleError(ctx context.Context, p *postman.TRISAPacket) (err e
 // then a service unavailable grpc error is returned.
 func (s *Server) WebhookResponse(ctx context.Context, payload *api.Payload, p *postman.TRISAPacket) (err error) {
 	// Create the webhook request (note that setting a nil payload will cause no issues if this is an error envelope)
-	request := p.In.WebhookRequest()
+	request := p.In.WebhookRequestFor(webhook.ProtocolTRISA)
 	if err = request.AddPayload(payload); err != nil {
 		p.Log.Error().Err(err).Msg("could not add payload to webhook callback")
 		return internalError

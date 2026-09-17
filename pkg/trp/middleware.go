@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/trisacrypto/envoy/pkg"
+	"github.com/trisacrypto/envoy/pkg/trp/callback"
 	"github.com/trisacrypto/envoy/pkg/web/api/v1"
 	"github.com/trisacrypto/trisa/pkg/openvasp"
 )
@@ -78,6 +80,42 @@ func VerifyTRPCore(c *gin.Context) {
 	}
 
 	c.Next()
+}
+
+// authorizeCallback checks the capability token embedded in a resolve or confirm
+// callback URL, aborting the request and returning false when it does not authorize this
+// transfer and purpose.
+//
+// Callbacks carry no other authentication: TRP peers post to the URL they were handed,
+// and in a TRP-only deployment there is no mTLS identity to check either. A refusal is
+// answered with the same 404 body as an unknown transfer so that the response does not
+// disclose whether the envelope id exists.
+//
+// A request that arrives on a tokenless legacy route is only honoured when the node was
+// explicitly configured to allow them, which exists for migrating transfers whose
+// callbacks were issued before tokens.
+func (s *Server) authorizeCallback(c *gin.Context, envelopeID uuid.UUID, purpose string) bool {
+	token := c.Param("token")
+
+	if token == "" {
+		if s.conf.TRP.AllowUnauthenticatedCallbacks {
+			return true
+		}
+
+		log.Warn().Str("envelope_id", envelopeID.String()).Str("purpose", purpose).Msg("refusing a tokenless trp callback")
+		c.AbortWithStatusJSON(http.StatusNotFound, api.NotFound)
+
+		return false
+	}
+
+	if !callback.Verify(s.conf.TRP.DecodeCallbackKey(), envelopeID.String(), purpose, token) {
+		log.Warn().Str("envelope_id", envelopeID.String()).Str("purpose", purpose).Msg("refusing a trp callback with an invalid token")
+		c.AbortWithStatusJSON(http.StatusNotFound, api.NotFound)
+
+		return false
+	}
+
+	return true
 }
 
 // If the server is in maintenance mode, aborts the current request and renders the

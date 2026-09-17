@@ -61,6 +61,7 @@ var testEnv = map[string]string{
 	"TRISA_TRP_ENABLED":                      "true",
 	"TRISA_TRP_BIND_ADDR":                    ":8012",
 	"TRISA_TRP_USE_MTLS":                     "false",
+	"TRISA_TRP_CALLBACK_KEY":                 "b1f8ad0a9a1c32ec19a24b0cbc1e5b0fdc5dd3ad4ee62b9b09b8b3b8fdd4a9c7",
 	"TRISA_TRP_POOL":                         "fixtures/certs/trp/pool.pem",
 	"TRISA_TRP_CERTS":                        "fixtures/certs/trp/certs.pem",
 	"TRISA_TRP_IDENTITY_VASP_NAME":           "Testing VASP",
@@ -134,6 +135,9 @@ func TestConfig(t *testing.T) {
 	require.Equal(t, testEnv["TRISA_TRP_ENDPOINT"], conf.TRP.Endpoint)
 	require.Equal(t, testEnv["TRISA_TRP_BIND_ADDR"], conf.TRP.BindAddr)
 	require.False(t, conf.TRP.UseMTLS)
+	require.Equal(t, testEnv["TRISA_TRP_CALLBACK_KEY"], conf.TRP.CallbackKey)
+	require.False(t, conf.TRP.AllowUnauthenticatedCallbacks)
+	require.Len(t, conf.TRP.DecodeCallbackKey(), 32)
 	require.Equal(t, testEnv["TRISA_TRP_POOL"], conf.TRP.Pool)
 	require.Equal(t, testEnv["TRISA_TRP_CERTS"], conf.TRP.Certs)
 	require.Equal(t, testEnv["TRISA_TRP_IDENTITY_VASP_NAME"], conf.TRP.Identity.VASPName)
@@ -169,6 +173,7 @@ func TestConfigValidation(t *testing.T) {
 				Maintenance: false,
 				BindAddr:    ":8012",
 				Endpoint:    "https://trp.example.com",
+				CallbackKey: testCallbackKey,
 			},
 			Webhook: config.WebhookConfig{
 				URL: "https://example.com/callback",
@@ -638,6 +643,9 @@ func TestWebhookConfig(t *testing.T) {
 	})
 }
 
+// A valid 32 byte hex encoded callback key for tests that need a TRP config to validate.
+const testCallbackKey = "b1f8ad0a9a1c32ec19a24b0cbc1e5b0fdc5dd3ad4ee62b9b09b8b3b8fdd4a9c7"
+
 func TestTRPConfig(t *testing.T) {
 	t.Run("Disabled", func(t *testing.T) {
 		conf := config.TRPConfig{Enabled: false}
@@ -650,24 +658,33 @@ func TestTRPConfig(t *testing.T) {
 				Enabled: false,
 			},
 			{
-				Endpoint: "https://trp.example.com",
-				Enabled:  true,
-				BindAddr: ":8012",
+				Endpoint:    "https://trp.example.com",
+				Enabled:     true,
+				BindAddr:    ":8012",
+				CallbackKey: testCallbackKey,
 			},
 			{
-				Endpoint: "https://trp.example.com",
-				Enabled:  true,
-				BindAddr: ":8012",
-				UseMTLS:  true,
+				Endpoint:    "https://trp.example.com",
+				Enabled:     true,
+				BindAddr:    ":8012",
+				CallbackKey: strings.ToUpper(testCallbackKey),
+			},
+			{
+				Endpoint:    "https://trp.example.com",
+				Enabled:     true,
+				BindAddr:    ":8012",
+				CallbackKey: testCallbackKey,
+				UseMTLS:     true,
 				MTLSConfig: config.MTLSConfig{
 					Certs: "fixtures/certs/trp/certs.pem",
 				},
 			},
 			{
-				Endpoint: "https://trp.example.com",
-				Enabled:  true,
-				BindAddr: ":8012",
-				UseMTLS:  true,
+				Endpoint:    "https://trp.example.com",
+				Enabled:     true,
+				BindAddr:    ":8012",
+				CallbackKey: testCallbackKey,
+				UseMTLS:     true,
 				MTLSConfig: config.MTLSConfig{
 					Certs: "fixtures/certs/trp/certs.pem",
 					Pool:  "fixtures/certs/trp/pool.pem",
@@ -706,16 +723,44 @@ func TestTRPConfig(t *testing.T) {
 					Endpoint: "https://trp.example.com",
 					Enabled:  true,
 					BindAddr: ":8012",
-					UseMTLS:  true,
+				},
+				errString: "invalid configuration: missing trp callback key",
+			},
+			{
+				conf: config.TRPConfig{
+					Endpoint:    "https://trp.example.com",
+					Enabled:     true,
+					BindAddr:    ":8012",
+					CallbackKey: "not hex",
+				},
+				errString: "invalid configuration: could not decode trp callback key: encoding/hex: invalid byte: U+006E 'n'",
+			},
+			{
+				conf: config.TRPConfig{
+					Endpoint:    "https://trp.example.com",
+					Enabled:     true,
+					BindAddr:    ":8012",
+					CallbackKey: "abcdef",
+				},
+				errString: "invalid configuration: trp callback key must be 32 bytes",
+			},
+			{
+				conf: config.TRPConfig{
+					Endpoint:    "https://trp.example.com",
+					Enabled:     true,
+					BindAddr:    ":8012",
+					CallbackKey: testCallbackKey,
+					UseMTLS:     true,
 				},
 				errString: "invalid configuration: specify certificates path",
 			},
 			{
 				conf: config.TRPConfig{
-					Endpoint: "https://trp.example.com",
-					Enabled:  true,
-					BindAddr: ":8012",
-					UseMTLS:  true,
+					Endpoint:    "https://trp.example.com",
+					Enabled:     true,
+					BindAddr:    ":8012",
+					CallbackKey: testCallbackKey,
+					UseMTLS:     true,
 					MTLSConfig: config.MTLSConfig{
 						Pool: "fixtures/certs/trp/pool.pem",
 					},

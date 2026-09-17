@@ -26,9 +26,11 @@ import (
 )
 
 var (
-	ErrNoTRPPayload     = errors.New("cannot create a trp message without a payload")
-	ErrNoTRPIdentity    = errors.New("cannot create a trp message without an ivms101 identity payload")
-	ErrNoTRPTransaction = errors.New("cannot create a trp message without a transaction payload")
+	ErrNoTRPPayload      = errors.New("cannot create a trp message without a payload")
+	ErrNoTRPIdentity     = errors.New("cannot create a trp message without an ivms101 identity payload")
+	ErrNoTRPTransaction  = errors.New("cannot create a trp message without a transaction payload")
+	ErrNoTRPResolution   = errors.New("cannot create a trp payload without an approval or rejection")
+	ErrNoTRPConfirmation = errors.New("cannot create a trp payload without a transaction id or cancellation")
 )
 
 // InquiryFromPayload converts a TRISA payload into a TRP v3 inquiry. It is the
@@ -272,8 +274,14 @@ func BeneficiaryAddress(env *envelope.Envelope) string {
 // the incoming message of the packet. TRP replies are bare JSON rather than secure
 // envelopes, so the incoming envelope is synthesised from the outgoing payload with
 // the transfer state that the resolution implies.
+//
+// A decision (an approval or a rejection) is stored as a TRP message rather than as an
+// echo of the inquiry, because the approval names the payment address and the callback
+// the confirmation for this transfer has to be posted to, and this envelope is where
+// they are read back from.
 func (p *TRPPacket) ReceiveResolution(in *trp.Resolution) (err error) {
 	transferState := trisa.TransferPending
+	payload := p.payload
 
 	switch {
 	case in == nil:
@@ -284,6 +292,12 @@ func (p *TRPPacket) ReceiveResolution(in *trp.Resolution) (err error) {
 		transferState = trisa.TransferAccepted
 	}
 
+	if transferState != trisa.TransferPending {
+		if payload, err = PayloadFromResolution(p.payload, in); err != nil {
+			return fmt.Errorf("could not create incoming trp resolution payload: %w", err)
+		}
+	}
+
 	p.message = in
 
 	opts := []envelope.Option{
@@ -291,7 +305,7 @@ func (p *TRPPacket) ReceiveResolution(in *trp.Resolution) (err error) {
 		envelope.WithTransferState(transferState),
 	}
 
-	if p.In.Envelope, err = envelope.New(p.payload, opts...); err != nil {
+	if p.In.Envelope, err = envelope.New(payload, opts...); err != nil {
 		return fmt.Errorf("could not create incoming trp resolution envelope: %w", err)
 	}
 

@@ -15,7 +15,12 @@ var (
 	ErrSupportedVersions        = fmt.Errorf("unsupported API version; this server supports %s", SupportedAPIVersions)
 	ErrMalformedContentType     = errors.New("malformed content-type header")
 	ErrUnsupportedContentType   = errors.New("content-type header must be application/json")
+	ErrWebhookUnavailable       = errors.New("envoy compliance callback is not available")
 )
+
+// The comment sent to a counterparty when the compliance callback rejects a transfer
+// without saying why; TRP has no machine readable rejection codes.
+const defaultRejection = "the counterparty rejected this transfer"
 
 // Returns a not found JSON response
 func (s *Server) NotFound(c *gin.Context) {
