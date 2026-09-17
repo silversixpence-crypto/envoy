@@ -178,8 +178,23 @@ func Checkpoint(path string) (err error) {
 
 	defer conn.Close()
 
-	if _, err = conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+	// The pragma reports rather than errors when it could not finish: busy is 1 if
+	// another connection blocked it, and log/checkpointed are the WAL frame counts
+	// (-1 when the database is not in WAL mode at all). Anything short of a complete
+	// checkpoint means committed transactions are still only in the -wal file, which
+	// is exactly what a caller about to copy the main file must not accept.
+	var busy, logged, checkpointed int
+
+	if err = conn.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logged, &checkpointed); err != nil {
 		return fmt.Errorf("could not checkpoint write-ahead log: %w", err)
+	}
+
+	if busy != 0 {
+		return fmt.Errorf("could not checkpoint write-ahead log: another connection holds the database")
+	}
+
+	if logged != -1 && checkpointed != logged {
+		return fmt.Errorf("could not checkpoint write-ahead log: %d of %d frames checkpointed", checkpointed, logged)
 	}
 
 	return nil
