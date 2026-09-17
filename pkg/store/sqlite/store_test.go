@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,56 @@ func TestConnectionParams(t *testing.T) {
 
 		_, err = tx.Exec("CREATE TABLE readonly_check (id INTEGER PRIMARY KEY)")
 		require.ErrorContains(t, err, "readonly database", "expected sqlite to refuse the write, not just the store")
+	})
+
+	t.Run("ReadOnlyKeepsJournalMode", func(t *testing.T) {
+		// A database created before the WAL default uses a rollback journal; opening
+		// it read only must not try to switch it to WAL, which is a write.
+		path := filepath.Join(t.TempDir(), "test.db")
+		createURI, _ := dsn.Parse("sqlite3:///" + path + "?_journal_mode=DELETE")
+
+		created, err := db.Open(createURI)
+		require.NoError(t, err, "could not create rollback-journal sqlite database")
+		require.Equal(t, "delete", pragma(t, created, "PRAGMA journal_mode"), "expected a rollback-journal database")
+		require.NoError(t, created.Close(), "could not close temporary sqlite database")
+
+		uri, _ := dsn.Parse("sqlite3:///" + path + "?readonly=true")
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not reopen a rollback-journal database read only")
+		defer store.Close()
+
+		require.Equal(t, "delete", pragma(t, store, "PRAGMA journal_mode"), "read only open must keep the existing journal mode")
+	})
+
+	t.Run("EscapesPath", func(t *testing.T) {
+		// dsn.Parse decodes the path, so a filename with URI metacharacters has to be
+		// re-escaped when the file: URI is built or the driver opens a different file.
+		path := filepath.Join(t.TempDir(), "odd#name?.db")
+		uri, _ := dsn.Parse("sqlite3:///" + strings.NewReplacer("#", "%23", "?", "%3F").Replace(path))
+		require.Equal(t, path, uri.Path, "expected the dsn to decode the path")
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not open a database whose name has uri metacharacters")
+		require.NoError(t, store.Close(), "could not close the database")
+
+		_, err = os.Stat(path)
+		require.NoError(t, err, "expected the database to be created at the decoded path")
+	})
+
+	t.Run("Checkpoint", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "test.db")
+		uri, _ := dsn.Parse("sqlite3:///" + path)
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not create temporary sqlite database")
+		require.Equal(t, "wal", pragma(t, store, "PRAGMA journal_mode"))
+		require.NoError(t, store.Close(), "could not close temporary sqlite database")
+
+		require.NoError(t, db.Checkpoint(path), "could not checkpoint the database")
+
+		info, err := os.Stat(path + "-wal")
+		require.True(t, err != nil || info.Size() == 0, "expected the write-ahead log to be empty or gone after a checkpoint")
 	})
 }
 

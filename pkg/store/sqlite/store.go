@@ -88,7 +88,7 @@ func Open(uri *dsn.DSN) (_ *Store, err error) {
 		Msg("opening sqlite3 database")
 
 	s := &Store{readonly: uri.ReadOnly}
-	if s.conn, err = sql.Open("sqlite3", "file:"+uri.Path+"?"+params); err != nil {
+	if s.conn, err = sql.Open("sqlite3", fileURI(uri.Path, params)); err != nil {
 		return nil, err
 	}
 
@@ -136,12 +136,53 @@ func connectionParams(uri *dsn.DSN) string {
 		params.Set(key, value)
 	}
 
-	// The read only flag is explicit in the DSN, so it wins over any mode option.
+	// The read only flag is explicit in the DSN, so it wins over any mode option. A
+	// read only connection also keeps whatever journal mode the file already has:
+	// switching an existing rollback-journal database to WAL is a write, and the
+	// driver runs that PRAGMA while initializing the connection, so the default would
+	// make every read only open of a pre-WAL database fail. An explicit journal mode
+	// in the DSN is still passed through.
 	if uri.ReadOnly {
 		params.Set("mode", "ro")
+
+		if _, explicit := uri.Options["_journal_mode"]; !explicit {
+			if _, explicit = uri.Options["_JOURNAL_MODE"]; !explicit {
+				params.Del("_journal_mode")
+			}
+		}
 	}
 
 	return params.Encode()
+}
+
+// fileURI renders a sqlite file: URI for the given filesystem path and encoded query
+// parameters. dsn.Parse has already URL-decoded the path, so it has to be escaped again
+// here: a literal "?" or "#" in a filename would otherwise be read by the driver as the
+// start of the query or fragment and open a different file than the one os.Stat checked.
+func fileURI(path, params string) string {
+	escaped := (&url.URL{Path: path}).EscapedPath()
+
+	return "file:" + escaped + "?" + params
+}
+
+// Checkpoint flushes the write-ahead log of the database at path into the main file
+// and truncates it. Tools that copy or rename the database file on its own (such as
+// the remigrate command) must call this first: with WAL journaling, committed
+// transactions can otherwise sit in the -wal sidecar and be missing from the copy.
+func Checkpoint(path string) (err error) {
+	var conn *sql.DB
+
+	if conn, err = sql.Open("sqlite3", fileURI(path, "_busy_timeout=5000")); err != nil {
+		return err
+	}
+
+	defer conn.Close()
+
+	if _, err = conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("could not checkpoint write-ahead log: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Store) Close() error {
