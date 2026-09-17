@@ -30,19 +30,30 @@ import (
 func New(conf config.TRISAConfig) (_ Network, err error) {
 	network := &TRISANetwork{
 		conf:        conf,
+		enabled:     conf.Enabled,
 		peers:       make(map[string]peers.Peer),
-		directory:   directory.New(conf),
 		constructor: peers.New,
 	}
 
-	if err = network.directory.Connect(); err != nil {
-		return nil, fmt.Errorf("could not connect to GDS: %s", err)
+	// The TRISA rail can be switched off so that a node only speaks TRP. Such a node
+	// has no GDS membership to look up and no TRISA peers to dial, so neither the
+	// directory client nor the mTLS peer dialer are constructed: every method that
+	// would need them returns ErrTRISADisabled instead.
+	if network.enabled {
+		network.directory = directory.New(conf)
+		if err = network.directory.Connect(); err != nil {
+			return nil, fmt.Errorf("could not connect to GDS: %s", err)
+		}
+
+		if network.dialer, err = TRISADialer(network.conf); err != nil {
+			return nil, err
+		}
 	}
 
-	if network.dialer, err = TRISADialer(network.conf); err != nil {
-		return nil, err
-	}
-
+	// The key chain is loaded whatever rail the node speaks: the identity certificate
+	// is also the node's sealing, storage, and compliance audit log signing key, which
+	// is why TRISAConfig.Validate requires Certs even when the TRISA rail is disabled.
+	//
 	// TODO: use policies to create different kinds of keychains.
 	// TODO: allow configuration of different underlying key stores.
 	// For now, the network creates a default key chain with in memory key stores and
@@ -58,6 +69,7 @@ func New(conf config.TRISAConfig) (_ Network, err error) {
 type TRISANetwork struct {
 	sync.RWMutex
 	conf        config.TRISAConfig
+	enabled     bool
 	keyChain    keychain.KeyChain
 	directory   directory.Directory
 	dialer      PeerDialer
@@ -78,6 +90,12 @@ func (n *TRISANetwork) FromContext(ctx context.Context) (peers.Peer, error) {
 		remote  *grpcpeer.Peer
 		tlsInfo credentials.TLSInfo
 	)
+
+	// Guard before parsing the certificates: the peer would be unresolvable anyway
+	// since LookupPeer needs the directory service to complete.
+	if !n.enabled {
+		return nil, fmt.Errorf("cannot resolve peer from context: %w", ErrTRISADisabled)
+	}
 
 	if remote, ok = grpcpeer.FromContext(ctx); !ok {
 		return nil, ErrNoGRPCPeer
@@ -109,6 +127,12 @@ func (n *TRISANetwork) FromContext(ctx context.Context) (peers.Peer, error) {
 // NOTE: registeredDirectory is currently unused and can be safely ignored, but is added
 // here for future proofing for the possibility of a distributed directory service.
 func (n *TRISANetwork) LookupPeer(ctx context.Context, commonNameOrID, registeredDirectory string) (peer peers.Peer, err error) {
+	// Without the TRISA rail there is no directory to resolve the peer with and no
+	// dialer to connect it with, so the cache is always empty.
+	if !n.enabled {
+		return nil, fmt.Errorf("cannot lookup peer %q: %w", commonNameOrID, ErrTRISADisabled)
+	}
+
 	// Check if the peer is in the cache (thread-safe)
 	// TODO: cache by vaspID/registeredDirectory in addition to common name
 	var ok bool
@@ -162,6 +186,12 @@ func (n *TRISANetwork) LookupPeer(ctx context.Context, commonNameOrID, registere
 // KeyExchange conducts a KeyExchange request with the remote peer and then caches the
 // response in the keychain for future use. The key is returned if available.
 func (n *TRISANetwork) KeyExchange(ctx context.Context, peer peers.Peer) (seal keys.Key, err error) {
+	// A key exchange is an RPC to a remote TRISA peer, which cannot exist without the
+	// TRISA rail (peers are only created by the directory-backed lookup methods).
+	if !n.enabled {
+		return nil, fmt.Errorf("cannot conduct key exchange: %w", ErrTRISADisabled)
+	}
+
 	var local keys.PublicKey
 	if local, err = n.keyChain.ExchangeKey(peer.Name()); err != nil {
 		return nil, err
@@ -187,6 +217,9 @@ func (n *TRISANetwork) KeyExchange(ctx context.Context, peer peers.Peer) (seal k
 	return seal, nil
 }
 
+// PeerDialer returns the mTLS dialer used to connect to remote peers. It returns nil
+// when the TRISA rail is disabled since no dialer is constructed in that case; callers
+// must check for nil rather than assume a dialer is always available.
 func (n *TRISANetwork) PeerDialer() PeerDialer {
 	return n.dialer
 }
@@ -284,6 +317,11 @@ func (n *TRISANetwork) KeyChain() (keychain.KeyChain, error) {
 // internal cache with connected peers. Routinely refreshing the network listing
 // improves the performance of lookups by preventing per-RPC GDS queries.
 func (n *TRISANetwork) Refresh() (err error) {
+	// The members listing is a GDS RPC; there is no directory client to make it with.
+	if !n.enabled {
+		return fmt.Errorf("cannot refresh the peer cache: %w", ErrTRISADisabled)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -331,6 +369,12 @@ func (n *TRISANetwork) Refresh() (err error) {
 }
 
 func (n *TRISANetwork) Directory() (directory.Directory, error) {
+	// No directory client is constructed when the TRISA rail is disabled: distinguish
+	// that expected state from a misconfigured network that should have one.
+	if !n.enabled {
+		return nil, fmt.Errorf("cannot access the directory service: %w", ErrTRISADisabled)
+	}
+
 	if n.directory == nil {
 		return nil, ErrNoDirectory
 	}
@@ -344,8 +388,11 @@ func (n *TRISANetwork) Directory() (directory.Directory, error) {
 // Close connections to directory service, all peer connections, and cleanup. The
 // network is unusable after it is closed and could panic if calls are made to it.
 func (n *TRISANetwork) Close() (err error) {
-	if cerr := n.directory.Close(); cerr != nil {
-		err = errors.Join(err, cerr)
+	// The directory is nil when the TRISA rail is disabled.
+	if n.directory != nil {
+		if cerr := n.directory.Close(); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
 	}
 
 	for name, peer := range n.peers {
@@ -362,8 +409,13 @@ func (n *TRISANetwork) Close() (err error) {
 }
 
 // String returns the last part of the configured endpoint usually returning
-// trisa.directory or testnet.directory depending on the configuration.
+// trisa.directory or testnet.directory depending on the configuration. If the TRISA
+// rail is disabled there is no directory to name, so it reports "disabled".
 func (n *TRISANetwork) String() string {
+	if !n.enabled {
+		return "disabled"
+	}
+
 	return n.conf.Directory.Network()
 }
 

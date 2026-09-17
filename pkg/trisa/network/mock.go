@@ -38,8 +38,12 @@ func NewMocked(conf *config.TRISAConfig) (_ Network, err error) {
 	}
 
 	// Create a basic TRISANetwork object with a testing config and a mock peer constructor.
+	// The mocked network always wires up a directory and a dialer below, so the TRISA
+	// rail is enabled regardless of the Enabled flag on the (often zero-valued) test
+	// config; use New with Enabled=false to exercise the disabled network instead.
 	network := &TRISANetwork{
 		conf:        *conf,
+		enabled:     true,
 		peers:       make(map[string]peers.Peer),
 		constructor: peers.NewMock,
 	}

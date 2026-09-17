@@ -20,6 +20,12 @@ func (s *Server) SendEnvelope(ctx context.Context, packet *postman.TRISAPacket) 
 	// receive the incoming reply from the counterparty.
 	switch packet.Counterparty.Protocol {
 	case enum.ProtocolTRISA:
+		// Match SendPacket: a node with the TRISA rail switched off has no peer dialer,
+		// so refuse before SendTRISA can attempt a lookup on the disabled network.
+		if !s.conf.Node.Enabled {
+			return ErrDisabled
+		}
+
 		if err = s.SendTRISA(ctx, packet); err != nil {
 			return err
 		}

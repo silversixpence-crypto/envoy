@@ -51,7 +51,16 @@ func TestConnectClose(t *testing.T) {
 	})
 
 	t.Run("ReadOnly", func(t *testing.T) {
-		uri, _ := dsn.Parse("sqlite3:///" + filepath.Join(t.TempDir(), "test.db") + "?readonly=true")
+		// NOTE: a readonly DSN opens sqlite with mode=ro, which cannot create the
+		// database file, so the database has to be created before it can be reopened.
+		path := filepath.Join(t.TempDir(), "test.db")
+		createURI, _ := dsn.Parse("sqlite3:///" + path)
+
+		created, err := db.Open(createURI)
+		require.NoError(t, err, "could not create temporary sqlite database")
+		require.NoError(t, created.Close(), "could not close temporary sqlite database")
+
+		uri, _ := dsn.Parse("sqlite3:///" + path + "?readonly=true")
 
 		store, err := db.Open(uri)
 		require.NoError(t, err, "could not open connection to temporary sqlite database")
@@ -88,6 +97,93 @@ func TestConnectClose(t *testing.T) {
 			require.ErrorIs(t, err, tc.err, "test case %d failed", i)
 		}
 	})
+}
+
+// The hosted image replicates the database with Litestream, which requires WAL mode and
+// a busy timeout, so the connection parameters have to reach the driver and the
+// operator has to be able to override them from the DSN.
+func TestConnectionParams(t *testing.T) {
+	t.Run("Defaults", func(t *testing.T) {
+		uri, _ := dsn.Parse("sqlite3:///" + filepath.Join(t.TempDir(), "test.db"))
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not open connection to temporary sqlite database")
+		defer store.Close()
+
+		require.Equal(t, "wal", pragma(t, store, "PRAGMA journal_mode"), "expected WAL journal mode for litestream replication")
+		require.Equal(t, "5000", pragma(t, store, "PRAGMA busy_timeout"), "expected a busy timeout so checkpoint locks wait instead of erroring")
+		require.Equal(t, "1", pragma(t, store, "PRAGMA synchronous"), "expected synchronous NORMAL (1) to pair with WAL")
+		require.Equal(t, "1", pragma(t, store, "PRAGMA foreign_keys"), "expected foreign key enforcement")
+	})
+
+	t.Run("EveryPooledConnection", func(t *testing.T) {
+		uri, _ := dsn.Parse("sqlite3:///" + filepath.Join(t.TempDir(), "test.db"))
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not open connection to temporary sqlite database")
+		defer store.Close()
+
+		// Hold a transaction open so that the pool has to hand out a second, fresh
+		// connection: the one-off PRAGMA in Open never reached that connection.
+		held, err := store.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+		require.NoError(t, err, "could not open the first transaction")
+		defer held.Rollback()
+
+		tx, err := store.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+		require.NoError(t, err, "could not open a second transaction on a fresh connection")
+		defer tx.Rollback()
+
+		var foreignKeys string
+		require.NoError(t, tx.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys), "could not query pragma")
+		require.Equal(t, "1", foreignKeys, "expected foreign keys on every pooled connection")
+	})
+
+	t.Run("Overrides", func(t *testing.T) {
+		uri, _ := dsn.Parse("sqlite3:///" + filepath.Join(t.TempDir(), "test.db") + "?_journal_mode=DELETE&_busy_timeout=250")
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not open connection to temporary sqlite database")
+		defer store.Close()
+
+		require.Equal(t, "delete", pragma(t, store, "PRAGMA journal_mode"), "expected the dsn journal mode to win over the default")
+		require.Equal(t, "250", pragma(t, store, "PRAGMA busy_timeout"), "expected the dsn busy timeout to win over the default")
+		require.Equal(t, "1", pragma(t, store, "PRAGMA foreign_keys"), "expected untouched defaults to still apply")
+	})
+
+	t.Run("ReadOnly", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "test.db")
+		createURI, _ := dsn.Parse("sqlite3:///" + path)
+
+		created, err := db.Open(createURI)
+		require.NoError(t, err, "could not create temporary sqlite database")
+		require.NoError(t, created.Close(), "could not close temporary sqlite database")
+
+		uri, _ := dsn.Parse("sqlite3:///" + path + "?readonly=true")
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not open connection to temporary sqlite database")
+		defer store.Close()
+
+		tx, err := store.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+		require.NoError(t, err, "could not create readonly transaction")
+		defer tx.Rollback()
+
+		_, err = tx.Exec("CREATE TABLE readonly_check (id INTEGER PRIMARY KEY)")
+		require.ErrorContains(t, err, "readonly database", "expected sqlite to refuse the write, not just the store")
+	})
+}
+
+// Returns the first column of the given pragma query as a string.
+func pragma(t *testing.T, store *db.Store, query string) string {
+	t.Helper()
+
+	tx, err := store.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err, "could not create readonly transaction")
+	defer tx.Rollback()
+
+	var value string
+	require.NoError(t, tx.QueryRow(query).Scan(&value), "could not query %s", query)
+	return value
 }
 
 //===========================================================================
