@@ -3,7 +3,7 @@
   "entity": {
     "name": {
       "name_identifiers": [{
-        "legal_person_name": "Localhost Counterparty",
+        "legal_person_name": "Luno",
         "legal_person_name_identifier_type": "LEGAL_PERSON_NAME_TYPE_CODE_LEGL"
       }]
     },
@@ -26,30 +26,30 @@
   "contacts": {
     "administrative": {
       "name": "Ralph Ritter",
-      "email": "ralph@counterparty.local",
+      "email": "ralph@luno.local",
       "phone": "+49 02243 80 59 03"
     },
     "legal": {
       "name": "Michael Beyer",
-      "email": "michael@counterparty.local",
+      "email": "michael@luno.local",
       "phone": "+49 04269 46 01 63"
     },
     "billing": {
       "name": "Michelle Probst",
-      "email": "michelle@counterparty.local",
+      "email": "michelle@luno.local",
       "phone": "+49 09771 12 49 34"
     },
     "technical": {
       "name": "Katja Jager",
-      "email": "katja@counterparty.local",
+      "email": "katja@luno.local",
       "phone": "+49 073 29 73 45"
     }
   },
   "identity_certificate": null,
   "signing_certificates": null,
-  "common_name": "counterparty.local",
-  "trisa_endpoint": "counterparty.local:9100",
-  "website": "http://counterparty.local:9000",
+  "common_name": "luno.local",
+  "trisa_endpoint": "luno.local:9100",
+  "website": "http://luno.local:9000",
   "business_category": "BUSINESS_ENTITY",
   "vasp_categories": ["DEX", "Exchange"],
   "established_on": "2022-12-15",
