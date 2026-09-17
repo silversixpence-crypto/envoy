@@ -108,8 +108,11 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 	envelopeID := p.EnvelopeID()
 	resolution := &trp.Resolution{}
 
+	// A completed transfer is reported with a TRP confirmation to the approval's own
+	// callback, not with a second approval; confirmations are not implemented yet, so
+	// TransferCompleted deliberately falls through to the error below.
 	switch state := p.Out.Envelope.TransferState(); state {
-	case trisa.TransferAccepted, trisa.TransferCompleted:
+	case trisa.TransferAccepted:
 		resolution.Approved = &trp.Approval{
 			Address:  postman.BeneficiaryAddress(p.Out.Envelope),
 			Callback: s.trpCallback(endpoint.Scheme, envelopeID),
@@ -173,10 +176,11 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 // convention; a peer with a different path prefix or with per-tenant routing never
 // receives the decision that way.
 //
-// Heuristic on the stored callback: Envoy-style peers supply a base callback of
-// /transfers/<id> and expect /resolve and /confirm beneath it (see pkg/trp/routes.go),
-// while other implementations supply the full resolve URL already. So /resolve is
-// appended only when the stored path does not already end with it.
+// The stored callback is used verbatim, as the TRP specification describes it as the
+// full URL to post the resolution to. The one exception is Envoy's own convention: an
+// Envoy originator supplies a base callback of /transfers/<envelope id> and serves the
+// resolution beneath it at /resolve (see pkg/trp/routes.go and trpCallback), so that
+// exact shape, and only that shape, gets /resolve appended.
 func (s *Server) resolutionCallback(ctx context.Context, p *postman.TRISAPacket, endpoint *url.URL, envelopeID string) (callback *url.URL, err error) {
 	var stored string
 
@@ -195,7 +199,7 @@ func (s *Server) resolutionCallback(ctx context.Context, p *postman.TRISAPacket,
 			return nil, fmt.Errorf("could not parse the trp callback supplied by the counterparty: %w", err)
 		}
 
-		if path := strings.TrimSuffix(callback.Path, "/"); !strings.HasSuffix(path, "/"+trpResolvePath) {
+		if path := strings.TrimSuffix(callback.Path, "/"); strings.HasSuffix(path, trpTransfersPath+"/"+envelopeID) {
 			callback.Path = path + "/" + trpResolvePath
 		}
 

@@ -127,6 +127,23 @@ func (s *Server) Resolve(c *gin.Context) {
 		return
 	}
 
+	// Pending TRISA and sunrise transfers are answered through their own protocols, so
+	// a TRP callback may only touch a transfer whose counterparty is reached over TRP.
+	var counterparty *models.Counterparty
+
+	if transaction.CounterpartyID.Valid {
+		if counterparty, err = s.store.RetrieveCounterparty(ctx, transaction.CounterpartyID.ULID); err != nil {
+			log.Warn().Err(err).Msg("could not load the counterparty of a transfer receiving a trp resolution")
+		}
+	}
+
+	if counterparty == nil || counterparty.Protocol != enum.ProtocolTRP {
+		log.Warn().Msg("refusing trp resolution for a transfer that is not conducted over trp")
+		c.AbortWithError(http.StatusNotFound, ErrUnknownTransfer)
+
+		return
+	}
+
 	transaction.Status = status
 	transaction.LastUpdate = sql.NullTime{Valid: true, Time: time.Now()}
 
