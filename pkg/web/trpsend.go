@@ -16,11 +16,14 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/trisacrypto/envoy/pkg/enum"
 	"github.com/trisacrypto/envoy/pkg/postman"
 	"github.com/trisacrypto/envoy/pkg/store/models"
 	"github.com/trisacrypto/trisa/pkg/openvasp/client"
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
 	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
+	generic "github.com/trisacrypto/trisa/pkg/trisa/data/generic/v1beta1"
 	"github.com/trisacrypto/trisa/pkg/trisa/envelope"
 	"github.com/trisacrypto/trisa/pkg/trisa/keys"
 )
@@ -124,12 +127,11 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 		return fmt.Errorf("could not create a valid trp resolution: %w", err)
 	}
 
-	// The counterparty endpoint may carry a path prefix (multi-tenant deployments
-	// route /<client>/transfers through a single hostname), so the resolve path is
-	// appended to the endpoint's path rather than replacing it.
-	callback := *endpoint
-	callback.Path = strings.TrimSuffix(strings.TrimSuffix(callback.Path, "/"), trpTransfersPath) +
-		strings.Join([]string{trpTransfersPath, envelopeID, trpResolvePath}, "/")
+	var callback *url.URL
+
+	if callback, err = s.resolutionCallback(ctx, p, endpoint, envelopeID); err != nil {
+		return err
+	}
 
 	resolution.Info = &trp.Info{
 		Address:           callback.String(),
@@ -156,6 +158,99 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 	}
 
 	return s.storeTRPEnvelopes(&p.Packet, "Server.SendTRPResolution()")
+}
+
+// resolutionCallback determines where the local compliance decision for an inbound
+// TRP transfer should be posted.
+//
+// The inquiry that opened the transfer supplied a callback URL and that is the only
+// address the sender committed to, so it is preferred. Rebuilding the URL from the
+// counterparty's inquiry endpoint only works for peers that follow Envoy's own URL
+// convention; a peer with a different path prefix or with per-tenant routing never
+// receives the decision that way.
+//
+// Heuristic on the stored callback: Envoy-style peers supply a base callback of
+// /transfers/<id> and expect /resolve and /confirm beneath it (see pkg/trp/routes.go),
+// while other implementations supply the full resolve URL already. So /resolve is
+// appended only when the stored path does not already end with it.
+func (s *Server) resolutionCallback(ctx context.Context, p *postman.TRISAPacket, endpoint *url.URL, envelopeID string) (callback *url.URL, err error) {
+	var stored string
+
+	if id, perr := uuid.Parse(envelopeID); perr == nil {
+		if stored, err = s.storedTRPCallback(ctx, id); err != nil {
+			// A missing or undecryptable inbound envelope is not fatal: the endpoint
+			// based reconstruction below is still attempted.
+			p.Log.Warn().Err(err).Msg("could not read the trp callback stored with the inbound inquiry")
+
+			stored = ""
+		}
+	}
+
+	if stored != "" {
+		if callback, err = url.Parse(stored); err != nil {
+			return nil, fmt.Errorf("could not parse the trp callback supplied by the counterparty: %w", err)
+		}
+
+		if path := strings.TrimSuffix(callback.Path, "/"); !strings.HasSuffix(path, "/"+trpResolvePath) {
+			callback.Path = path + "/" + trpResolvePath
+		}
+
+		p.Log.Info().Str("callback", callback.String()).Str("callback_source", "inquiry").Msg("resolving trp transfer to the callback supplied by the counterparty")
+
+		return callback, nil
+	}
+
+	// The counterparty endpoint may carry a path prefix (multi-tenant deployments
+	// route /<client>/transfers through a single hostname), so the resolve path is
+	// appended to the endpoint's path rather than replacing it.
+	uri := *endpoint
+	uri.Path = strings.TrimSuffix(strings.TrimSuffix(uri.Path, "/"), trpTransfersPath) +
+		strings.Join([]string{trpTransfersPath, envelopeID, trpResolvePath}, "/")
+
+	p.Log.Info().Str("callback", uri.String()).Str("callback_source", "endpoint").Msg("no stored trp callback; resolving to a url rebuilt from the counterparty endpoint")
+
+	return &uri, nil
+}
+
+// storedTRPCallback recovers the callback URL that the inbound inquiry for this
+// transfer supplied. postman.PayloadFromInquiry stores it on the generic.TRP message
+// of the incoming payload, so the sealed incoming envelope has to be fetched and
+// decrypted to read it back.
+//
+// An empty string with no error means there is nothing to use: either the payload did
+// not arrive over TRP (it carries a generic.Transaction instead) or the inquiry
+// carried no callback.
+func (s *Server) storedTRPCallback(ctx context.Context, envelopeID uuid.UUID) (_ string, err error) {
+	var env *models.SecureEnvelope
+
+	if env, err = s.store.LatestSecureEnvelope(ctx, envelopeID, enum.DirectionIncoming); err != nil {
+		return "", fmt.Errorf("could not retrieve incoming envelope: %w", err)
+	}
+
+	var decrypted *envelope.Envelope
+
+	if decrypted, err = s.Decrypt(env); err != nil {
+		return "", fmt.Errorf("could not decrypt incoming envelope: %w", err)
+	}
+
+	var payload *trisa.Payload
+
+	if payload, err = decrypted.Payload(); err != nil {
+		return "", fmt.Errorf("could not read incoming payload: %w", err)
+	}
+
+	if payload.Transaction == nil {
+		return "", nil
+	}
+
+	trpmsg := &generic.TRP{}
+
+	if err = payload.Transaction.UnmarshalTo(trpmsg); err != nil {
+		// Not a TRP payload, so there is no stored callback to report.
+		return "", nil
+	}
+
+	return trpmsg.GetInquiry().GetCallback(), nil
 }
 
 // storeTRPEnvelopes seals both halves of a TRP packet with the node's storage key and
