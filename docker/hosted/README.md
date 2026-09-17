@@ -202,3 +202,6 @@ Restoring onto a fresh volume is the same command with an empty `/srv/envoy/acme
 nothing, the container refuses to start rather than inventing a new node.
 
 [ls]: https://litestream.io/reference/config/
+
+
+`NODE_SLUG` (optional): the slug sent in the bootstrap callback body. Defaults to `LITESTREAM_PATH`, which may carry a deployment prefix such as `prod/<slug>`; a provisioner that keys nodes by bare slug should set it.
