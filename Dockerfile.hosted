@@ -34,8 +34,11 @@ FROM debian:bookworm-slim AS final
 
 LABEL description="TRISA Envoy node, TRP-only, SQLite replicated with Litestream"
 
+# curl is not a debugging convenience: the entrypoint's bootstrap callback uses it to
+# hand the node's first API key back to whatever provisioned it, because a hosted
+# container has no `docker exec`. See docker/hosted/README.md.
 RUN set -x && apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates sqlite3 && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates sqlite3 curl && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /go/bin/envoy /usr/local/bin/envoy
@@ -46,5 +49,11 @@ COPY docker/hosted/entrypoint.sh /usr/local/bin/hosted-entrypoint.sh
 
 RUN chmod 0755 /usr/local/bin/hosted-entrypoint.sh && \
     mkdir -p /data /run/node && chmod 0700 /run/node
+
+# Declarative only under Docker and on Cloudflare Containers in production, but
+# `wrangler dev` reads the image's exposed ports to decide what to map locally, so
+# without these two lines the local container is unreachable from the Worker.
+# https://developers.cloudflare.com/containers/local-dev/
+EXPOSE 8000 8200
 
 ENTRYPOINT [ "/usr/local/bin/hosted-entrypoint.sh" ]
