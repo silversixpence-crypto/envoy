@@ -21,7 +21,10 @@ import (
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
 )
 
-var ErrUnknownTransfer = errors.New("no transfer with the specified envelope id")
+var (
+	ErrUnknownTransfer       = errors.New("no transfer with the specified envelope id")
+	ErrNotAwaitingResolution = errors.New("transfer is not awaiting a resolution")
+)
 
 // Resolve applies an inbound TRP resolution to the referenced transaction: an
 // approval marks it accepted, a rejection marks it rejected, and a version-only
@@ -90,6 +93,37 @@ func (s *Server) Resolve(c *gin.Context) {
 
 	if transaction, err = db.Fetch(); err != nil {
 		c.AbortWithError(http.StatusInternalServerError, err)
+		return
+	}
+
+	// This endpoint is unauthenticated in TRP-only deployments: without mTLS the
+	// caller's identity cannot be verified, so anyone who can reach the node can post
+	// a resolution for any envelope id it knows. The two checks below bound the damage
+	// to transfers this node itself opened and is still waiting on, which stops a
+	// remote sender from approving the inbound transfer it just submitted and skipping
+	// local compliance review entirely.
+	log = log.With().
+		Str("source", transaction.Source.String()).
+		Str("transfer_status", transaction.Status.String()).
+		Logger()
+
+	// Only an inquiry that originated here can be resolved by a counterparty; an
+	// inbound transfer is resolved by the local compliance team instead. Answer 404 so
+	// the refusal does not reveal that the envelope id exists.
+	if transaction.Source != enum.SourceLocal {
+		log.Warn().Msg("refusing trp resolution for a transfer that did not originate on this node")
+		c.AbortWithError(http.StatusNotFound, ErrUnknownTransfer)
+
+		return
+	}
+
+	// An outgoing inquiry sits in pending while it awaits the beneficiary's decision.
+	// Any other status (accepted, rejected, review, completed, ...) has already been
+	// resolved or is not resolvable, so a second resolution is refused.
+	if transaction.Status != enum.StatusPending {
+		log.Warn().Msg("refusing trp resolution for a transfer that is not awaiting one")
+		c.AbortWithError(http.StatusConflict, ErrNotAwaitingResolution)
+
 		return
 	}
 
