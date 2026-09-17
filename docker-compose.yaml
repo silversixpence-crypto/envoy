@@ -45,6 +45,7 @@ services:
       - TRISA_TRP_BIND_ADDR=:8200
       - TRISA_TRP_ENDPOINT=xago.local:8200
       - TRISA_TRP_USE_MTLS=false
+      - TRISA_TRP_CALLBACK_KEY=4d1f1d9a0f0c9c6b1e3a7f5d8c2b6a4e9f0d3c7b5a8e1f2d4c6b9a0e3f7d5c8b
       - TRISA_TRP_POOL=/run/secrets/localhost.pem.gz
       - TRISA_TRP_CERTS=/run/secrets/server.pem.gz
 
@@ -88,6 +89,7 @@ services:
       - TRISA_TRP_BIND_ADDR=:8200
       - TRISA_TRP_ENDPOINT=luno.local:8200
       - TRISA_TRP_USE_MTLS=false
+      - TRISA_TRP_CALLBACK_KEY=7c3b9e1a5d8f0c2b4a6e9d1f3c5b7a0e2d4f6c8b1a3e5d7f9c0b2a4e6d8f1c3b
       - TRISA_TRP_POOL=/run/secrets/localhost.pem.gz
       - TRISA_TRP_CERTS=/run/secrets/server.pem.gz
 

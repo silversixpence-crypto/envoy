@@ -3,6 +3,8 @@ package webhook_test
 import (
 	"compress/gzip"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,8 +14,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/trisacrypto/envoy/pkg/config"
@@ -162,6 +166,80 @@ func TestWebhook(t *testing.T) {
 		_, err = cb.Callback(ctx, req)
 		require.Error(t, err, "could not execute callback request")
 		require.EqualError(t, err, "could not make webhook callback: received status 401 Unauthorized")
+	})
+
+	t.Run("BodySignature", func(t *testing.T) {
+		// The gateway that consumes these callbacks verifies the body it read against
+		// the X-Envoy-Signature header, so the signature has to cover the exact bytes
+		// on the wire rather than the request struct.
+		var (
+			body      []byte
+			timestamp string
+			signature string
+		)
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ = io.ReadAll(r.Body)
+			timestamp = r.Header.Get("X-Envoy-Timestamp")
+			signature = r.Header.Get("X-Envoy-Signature")
+
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer srv.Close()
+
+		endpoint, _ := url.Parse(srv.URL)
+		endpoint.Path = "/"
+
+		secret := "cfbabc4715b4759d45ba26953dd2fc0bfc2344ef70a2005432e7f16b5081610d"
+		cb, err := webhook.New(config.WebhookConfig{
+			URL:           endpoint.String(),
+			AuthKeyID:     "01JT4B3R5Z6AHJXV87QHPPKRBM",
+			AuthKeySecret: secret,
+		})
+		require.NoError(t, err, "could not create webhook with client auth")
+
+		_, err = cb.Callback(ctx, req)
+		require.NoError(t, err, "could not execute callback request")
+
+		require.Regexp(t, `^\d{10}$`, timestamp, "expected a 10 digit unix seconds timestamp")
+
+		unix, err := strconv.ParseInt(timestamp, 10, 64)
+		require.NoError(t, err, "could not parse the timestamp header")
+		require.WithinDuration(t, time.Now(), time.Unix(unix, 0), 30*time.Second, "expected a current timestamp")
+
+		require.Regexp(t, `^sha256=[a-f0-9]{64}$`, signature, "expected a lowercase hex sha256 signature")
+
+		// Receivers key the body signature with the shared secret string as configured,
+		// not with its hex decoding (which only the Authorization header uses).
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(timestamp))
+		mac.Write([]byte("."))
+		mac.Write(body)
+
+		require.Equal(t, "sha256="+hex.EncodeToString(mac.Sum(nil)), signature, "signature does not match the body that was sent")
+	})
+
+	t.Run("NoBodySignatureWithoutClientAuth", func(t *testing.T) {
+		var headers http.Header
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			headers = r.Header.Clone()
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer srv.Close()
+
+		endpoint, _ := url.Parse(srv.URL)
+		endpoint.Path = "/"
+
+		cb, err := webhook.New(config.WebhookConfig{URL: endpoint.String()})
+		require.NoError(t, err, "could not create webhook handler")
+
+		_, err = cb.Callback(ctx, req)
+		require.NoError(t, err, "could not execute callback request")
+
+		require.Empty(t, headers.Get("X-Envoy-Timestamp"), "did not expect a timestamp header without client auth")
+		require.Empty(t, headers.Get("X-Envoy-Signature"), "did not expect a signature header without client auth")
+		require.Empty(t, headers.Get("Authorization"), "did not expect an authorization header without client auth")
 	})
 
 	t.Run("ServerAuth", func(t *testing.T) {
