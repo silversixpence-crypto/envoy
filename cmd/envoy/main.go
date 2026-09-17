@@ -282,6 +282,14 @@ func remigrate(c *cli.Context) (err error) {
 		back = orig + ".bak"
 	}
 
+	// The store journals in WAL mode, so committed transactions may still be in the
+	// -wal sidecar (for example after an unclean shutdown). Flush them into the main
+	// file before it is renamed, otherwise the backup opened below silently lacks
+	// them and the remigration loses data.
+	if err = sqlite.Checkpoint(orig); err != nil {
+		return cli.Exit(fmt.Errorf("could not checkpoint source database before backup: %w", err), 1)
+	}
+
 	// Copy the src to the destination
 	if err = os.Rename(orig, back); err != nil {
 		return cli.Exit(err, 1)

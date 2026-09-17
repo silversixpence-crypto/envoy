@@ -63,6 +63,9 @@ func New(conf config.Config) (node *Node, err error) {
 		return nil, err
 	}
 
+	// Reconcile the config before it is handed to any service so that they all agree.
+	conf = disableDirectorySync(conf)
+
 	// Create the node and start to register its internal servers
 	node = &Node{
 		conf: conf,
@@ -100,11 +103,18 @@ func New(conf config.Config) (node *Node, err error) {
 	if node.network, err = network.New(conf.Node); err != nil {
 		return nil, err
 	}
-	log.Debug().
-		Str("endpoint", conf.Node.Endpoint).
-		Str("gds", conf.Node.Directory.Endpoint).
-		Str("members", conf.Node.Directory.MembersEndpoint).
-		Msg("trisa initialized")
+
+	if conf.Node.Enabled {
+		log.Debug().
+			Str("endpoint", conf.Node.Endpoint).
+			Str("gds", conf.Node.Directory.Endpoint).
+			Str("members", conf.Node.Directory.MembersEndpoint).
+			Msg("trisa initialized")
+	} else {
+		log.Debug().
+			Bool("trisa_enabled", false).
+			Msg("trisa initialized: rail disabled, no directory or peer connections will be made")
+	}
 
 	// Add the node's keychain.KeyChain (created in the network) to the audit package
 	// for ComplianceAuditLog signatures and verification. NOTE: ComplianceAuditLogs
@@ -140,6 +150,20 @@ func New(conf config.Config) (node *Node, err error) {
 	}
 
 	return node, nil
+}
+
+// A TRP-only node (TRISA_NODE_ENABLED=false) has no directory client on its network, so
+// there is nothing for the directory sync service to synchronize counterparties from and
+// directory.New would fail when it asks the network for a directory. Force the sync off
+// on the config copy rather than error so that an operator who only flips the TRISA rail
+// off still gets a node that boots.
+func disableDirectorySync(conf config.Config) config.Config {
+	if !conf.Node.Enabled && conf.DirectorySync.Enabled {
+		log.Warn().Msg("directory sync disabled: the trisa node is disabled so there is no directory service to sync counterparties from")
+		conf.DirectorySync.Enabled = false
+	}
+
+	return conf
 }
 
 // Node implements the complete TRISA Self Hosted Node including the TRISA gRPC server,

@@ -269,3 +269,69 @@ func TestString(t *testing.T) {
 
 	require.Equal(t, "bufnet", trisa.String(), "stringer should return conf.Directory.Network()")
 }
+
+// A TRP-only node runs with TRISA_NODE_ENABLED=false. The network must still come up
+// with a working key chain (the identity certificate is also the node's sealing,
+// storage, and compliance audit log signing key) but must not connect to the directory
+// service or construct an mTLS peer dialer.
+func TestDisabledNetwork(t *testing.T) {
+	conf := config.TRISAConfig{
+		MTLSConfig: config.MTLSConfig{
+			Pool:  "testdata/pool.pem",
+			Certs: "testdata/alice.pem",
+		},
+		Enabled:             false,
+		KeyExchangeCacheTTL: 1 * time.Hour,
+		Directory: config.DirectoryConfig{
+			Endpoint:        "api.trisa.directory:443",
+			MembersEndpoint: "members.trisa.directory:443",
+		},
+	}
+
+	trisa, err := network.New(conf)
+	require.NoError(t, err, "could not create a disabled trisa network")
+	require.Equal(t, "disabled", trisa.String(), "a disabled network should not name a directory")
+
+	// The key chain is loaded from the identity certificates whatever the rail.
+	kc, err := trisa.KeyChain()
+	require.NoError(t, err, "expected a key chain on a disabled network")
+	require.NotNil(t, kc, "expected a key chain on a disabled network")
+
+	// NOTE: SealingKey resolves keys received from remote counterparties, so the local
+	// identity key is checked with the internal source methods used by TRP and sunrise.
+	exchangeKey, err := trisa.ExchangeKey("alice.vaspbot.com")
+	require.NoError(t, err, "expected the local identity key to be available for exchange")
+	require.NotNil(t, exchangeKey, "expected the local identity key to be available for exchange")
+
+	storageKey, err := trisa.StorageKey("", "alice.vaspbot.com")
+	require.NoError(t, err, "expected the local identity key to be available for storage")
+	require.NotNil(t, storageKey, "expected the local identity key to be available for storage")
+
+	// No remote sealing keys have been exchanged so there is nothing cached externally.
+	_, err = trisa.SealingKey("alice.vaspbot.com")
+	require.Error(t, err, "no remote sealing keys should be available on a disabled network")
+
+	// Everything that requires the directory or the dialer is refused.
+	ctx := context.Background()
+
+	_, err = trisa.LookupPeer(ctx, "alice.vaspbot.com", "")
+	require.ErrorIs(t, err, network.ErrTRISADisabled, "lookup peer should report the network is disabled")
+
+	_, err = trisa.FromContext(ctx)
+	require.ErrorIs(t, err, network.ErrTRISADisabled, "from context should report the network is disabled")
+
+	_, err = trisa.KeyExchange(ctx, nil)
+	require.ErrorIs(t, err, network.ErrTRISADisabled, "key exchange should report the network is disabled")
+
+	_, err = trisa.Directory()
+	require.ErrorIs(t, err, network.ErrTRISADisabled, "directory should report the network is disabled")
+
+	err = trisa.Refresh()
+	require.ErrorIs(t, err, network.ErrTRISADisabled, "refresh should report the network is disabled")
+
+	trisaActual, ok := trisa.(*network.TRISANetwork)
+	require.True(t, ok, "trisa should be a TRISANetwork")
+	require.Nil(t, trisaActual.PeerDialer(), "no peer dialer should be created when the network is disabled")
+
+	require.NoError(t, trisa.Close(), "could not close a disabled network")
+}
