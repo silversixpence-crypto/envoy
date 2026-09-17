@@ -16,7 +16,7 @@ func testTRISAWorkflow_Approve() (err error) {
 
 	// Prepare a transaction to send
 	// TODO: get travel address from command line
-	prepare := makePrepare("ta2fFeKgcLirnGbYFL9YnkqWr8kQu1gW7PWhxHqqcDErjSZLTeeqYWGKwbNT")
+	prepare := makePrepare("ta3TD4FEdd45Ay4SZBvVjhXj3zgYY65Bj1zg4uyU6ornzYfPi")
 
 	var prepared *api.Prepared
 	if prepared, err = envoyClient.Prepare(ctx, prepare); err != nil {
@@ -66,7 +66,7 @@ func testTRISAWorkflow_Reject() (err error) {
 
 	// Prepare a transaction to send
 	// TODO: get travel address from command line
-	prepare := makePrepare("ta2fFeKgcLirnGbYFL9YnkqWr8kQu1gW7PWhxHqqcDErjSZLTeeqYWGKwbNT")
+	prepare := makePrepare("ta3TD4FEdd45Ay4SZBvVjhXj3zgYY65Bj1zg4uyU6ornzYfPi")
 
 	var prepared *api.Prepared
 	if prepared, err = envoyClient.Prepare(ctx, prepare); err != nil {
@@ -105,7 +105,7 @@ func testTRISAWorkflow_Repair() (err error) {
 
 	// Prepare a transaction to send
 	// TODO: get travel address from command line
-	prepare := makePrepare("ta2fFeKgcLirnGbYFL9YnkqWr8kQu1gW7PWhxHqqcDErjSZLTeeqYWGKwbNT")
+	prepare := makePrepare("ta3TD4FEdd45Ay4SZBvVjhXj3zgYY65Bj1zg4uyU6ornzYfPi")
 
 	var prepared *api.Prepared
 	if prepared, err = envoyClient.Prepare(ctx, prepare); err != nil {

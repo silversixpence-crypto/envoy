@@ -398,7 +398,7 @@ func sendTRISA(c *cli.Context) (err error) {
 	defer cancel()
 
 	// TODO: get travel address from command line
-	prepare := makePrepare("ta2fFeKgcLirnGbYFL9YnkqWr8kQu1gW7PWhxHqqcDErjSZLTeeqYWGKwbNT")
+	prepare := makePrepare("ta3TD4FEdd45Ay4SZBvVjhXj3zgYY65Bj1zg4uyU6ornzYfPi")
 
 	var prepared *api.Prepared
 	if prepared, err = envoyClient.Prepare(ctx, prepare); err != nil {

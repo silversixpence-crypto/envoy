@@ -6,7 +6,11 @@
 // It mirrors the store-opening pattern from cmd/fsi/main.go (connectDB) and
 // the protojson-unmarshal pattern from cmd/fsi/localhost.go.
 //
-//	registrar -db leveldb:///data/db -in /in/vasp.json
+//	registrar -db leveldb:////data/db -in /in/vasp.json
+//
+// Note the four slashes: the directory package's ParseDSN trims one leading
+// slash from the path, so leveldb:///data/db would open data/db relative to the
+// working directory rather than the /data volume.
 package main
 
 import (
@@ -24,7 +28,7 @@ import (
 )
 
 func main() {
-	dbURL := flag.String("db", "leveldb:///data/db", "directory store DSN")
+	dbURL := flag.String("db", "leveldb:////data/db", "directory store DSN (absolute paths need four slashes)")
 	inPath := flag.String("in", "/in/vasp.json", "path to the VASP protojson file to load")
 	flag.Parse()
 
