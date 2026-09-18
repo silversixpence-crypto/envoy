@@ -26,7 +26,7 @@ func (s *Store) RegenerateTravelAddresses(ctx context.Context) (err error) {
 	}
 
 	var tx *sql.Tx
-	if tx, err = s.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: false}); err != nil {
+	if tx, err = s.writer().BeginTx(ctx, &sql.TxOptions{ReadOnly: false}); err != nil {
 		return err
 	}
 	defer tx.Rollback()
@@ -120,7 +120,7 @@ const (
 
 func (s *Store) CountTravelAddresses(ctx context.Context) (_ int64, err error) {
 	var tx *sql.Tx
-	if tx, err = s.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true}); err != nil {
+	if tx, err = s.read.BeginTx(ctx, &sql.TxOptions{ReadOnly: true}); err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()

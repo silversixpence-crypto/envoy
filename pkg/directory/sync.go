@@ -155,18 +155,22 @@ func (s *Sync) Sync() (err error) {
 		// Add actor information to the context for the audit log
 		ctx = audit.WithActor(ctx, []byte("Sync.Sync()"), enum.ActorSystem)
 
+		// Fetch the member details before opening the transaction. This is a GDS round
+		// trip with its own timeout, and a write transaction holds the database's write
+		// lock from BEGIN, so opening it first would block every other writer on the
+		// node for as long as the directory takes to answer.
+		var vasp *models.Counterparty
+		if vasp, err = s.Counterparty(member.Id); err != nil {
+			log.Warn().Err(err).Str("vaspID", member.Id).Msg("could not fetch vasp member details")
+			return nil
+		}
+
 		// Create a new transaction for each member to ensure isolation
 		var tx txn.Txn
 		if tx, err = s.store.Begin(ctx, &sql.TxOptions{ReadOnly: false}); err != nil {
 			return err
 		}
 		defer tx.Rollback()
-
-		var vasp *models.Counterparty
-		if vasp, err = s.Counterparty(member.Id); err != nil {
-			log.Warn().Err(err).Str("vaspID", member.Id).Msg("could not fetch vasp member details")
-			return nil
-		}
 
 		// Lookup the counterparty in the local table to determine if update or create is required
 		var update bool

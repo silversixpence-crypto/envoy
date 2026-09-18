@@ -31,7 +31,7 @@ func (s *Store) InitializeSchema(empty bool) (err error) {
 	lastApplied := -1
 	if !empty {
 		// Fetch the latest migration applied to the database
-		if err = s.conn.QueryRow(lastAppliedSQL).Scan(&lastApplied); err != nil {
+		if err = s.writer().QueryRow(lastAppliedSQL).Scan(&lastApplied); err != nil {
 			return fmt.Errorf("could not fetch last applied migration: %s", err)
 		}
 	}
@@ -48,11 +48,11 @@ func (s *Store) InitializeSchema(empty bool) (err error) {
 				return err
 			}
 
-			if _, err = s.conn.Exec(query); err != nil {
+			if _, err = s.writer().Exec(query); err != nil {
 				return fmt.Errorf("could not apply schema %d: %s", migration.ID, err)
 			}
 
-			if _, err = s.conn.Exec(insertMigrationSQL, migration.ID, migration.Name, pkg.Version(true)); err != nil {
+			if _, err = s.writer().Exec(insertMigrationSQL, migration.ID, migration.Name, pkg.Version(true)); err != nil {
 				return fmt.Errorf("could not insert migration record for %d: %s", migration.ID, err)
 			}
 		}
