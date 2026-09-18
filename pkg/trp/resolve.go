@@ -9,22 +9,23 @@ package trp
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/trisacrypto/envoy/pkg/enum"
 	"github.com/trisacrypto/envoy/pkg/logger"
 	"github.com/trisacrypto/envoy/pkg/postman"
 	"github.com/trisacrypto/envoy/pkg/store/models"
 	"github.com/trisacrypto/envoy/pkg/trp/callback"
+	"github.com/trisacrypto/envoy/pkg/webhook"
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
 	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
-	"github.com/trisacrypto/trisa/pkg/trisa/envelope"
 	"github.com/trisacrypto/trisa/pkg/trisa/keys"
 )
 
@@ -157,6 +158,12 @@ func (s *Server) Resolve(c *gin.Context) {
 		return
 	}
 
+	// The callback request is built inside the transaction but posted after the commit,
+	// so it is declared out here. It stays nil for a version-only acknowledgement, which
+	// records nothing and is not an outcome to notify the operator about, and for a node
+	// with no webhook configured.
+	var hookReq *webhook.Request
+
 	// Record the decision as an incoming secure envelope. Beyond the audit trail this is
 	// load bearing for approvals: the confirmation this node sends when the transfer
 	// completes has to go to the callback named in the approval, and this envelope is the
@@ -165,11 +172,65 @@ func (s *Server) Resolve(c *gin.Context) {
 	// counterparty cannot resubmit once the status has moved. Answering 500 keeps the
 	// transfer pending so the counterparty retries.
 	if status != enum.StatusPending {
-		if err = s.storeResolution(ctx, db, envelopeID, counterparty, in); err != nil {
+		var packet *postman.TRPPacket
+
+		if packet, err = s.resolutionPacket(ctx, envelopeID, in, c.Request.TLS); err != nil {
+			log.Error().Err(err).Bool("stored_to_database", false).Msg("could not build the incoming envelope for a trp resolution")
+			c.AbortWithError(http.StatusInternalServerError, err)
+
+			return
+		}
+
+		packet.Log = log
+		packet.DB = db
+		packet.Counterparty = counterparty
+
+		var storageKey keys.PublicKey
+
+		if storageKey, err = s.trisa.StorageKey("", counterparty.CommonName); err != nil {
+			log.Error().Err(err).Bool("stored_to_database", false).Msg("could not get storage key for trp resolution")
+			c.AbortWithError(http.StatusInternalServerError, err)
+
+			return
+		}
+
+		// Keep the cleartext envelope for the webhook: Seal replaces it with the sealed one.
+		clear := packet.In.Envelope
+
+		if err = packet.Seal(storageKey); err != nil {
+			log.Error().Err(err).Bool("stored_to_database", false).Msg("could not seal trp resolution")
+			c.AbortWithError(http.StatusInternalServerError, err)
+
+			return
+		}
+
+		if err = db.AddEnvelope(packet.In.Model(), &models.ComplianceAuditLog{
+			ChangeNotes: sql.NullString{Valid: true, String: "Server.Resolve()"},
+		}); err != nil {
 			log.Error().Err(err).Bool("stored_to_database", false).Msg("could not store the incoming envelope for a trp resolution")
 			c.AbortWithError(http.StatusInternalServerError, err)
 
 			return
+		}
+
+		// Build the callback request here, where the packet still exists, so that the
+		// notification below is handed nothing but the request: see notifyResolution for
+		// why it must not be able to reach the transfer. A payload that cannot be
+		// assembled costs the operator a notification but must not cost the counterparty
+		// its 204, so it is logged and the resolution continues without one.
+		if s.WebhookEnabled() {
+			packet.RevealIncoming(clear)
+
+			hookReq = packet.In.WebhookRequestFor(webhook.ProtocolTRP)
+
+			// The transfer state on the request is accepted or rejected and the TRP
+			// message in the payload carries the approval address or the rejection
+			// comment, so a receiver can tell the two outcomes apart and identify the
+			// transfer by its envelope id.
+			if err = hookReq.AddPayload(packet.Payload()); err != nil {
+				log.Error().Err(err).Msg("could not add payload to webhook callback")
+				hookReq = nil
+			}
 		}
 	}
 
@@ -190,74 +251,66 @@ func (s *Server) Resolve(c *gin.Context) {
 
 	log.Info().Msg("trp resolution applied to transaction")
 
+	// Notify the operator's back office that their outbound transfer was decided. This
+	// deliberately sits after the commit: a callback may block for the full 30 second
+	// webhook timeout, and on SQLite a write transaction held that long stalls every
+	// other writer on the node. It also means the status the counterparty set is already
+	// durable before anything outside the node is told about it.
+	if hookReq != nil {
+		s.notifyResolution(context.WithoutCancel(ctx), hookReq, log)
+	}
+
 	// A 204 should be sent in response to a transfer inquiry resolution.
 	c.Status(http.StatusNoContent)
 }
 
-// storeResolution records an asynchronous resolution as an incoming secure envelope,
-// built on the payload of the inquiry this node sent, and sealed with the node's own
-// storage key because TRP messages are plaintext on the wire.
-func (s *Server) storeResolution(ctx context.Context, db models.PreparedTransaction, envelopeID uuid.UUID, counterparty *models.Counterparty, in *trp.Resolution) (err error) {
+// resolutionPacket builds the incoming half of an asynchronous resolution from the
+// payload of the inquiry this node sent, which is where the identity record and the
+// reference transaction come from. The envelope is sealed with the node's own storage
+// key by the caller, because TRP messages are plaintext on the wire.
+func (s *Server) resolutionPacket(ctx context.Context, envelopeID uuid.UUID, in *trp.Resolution, mtls *tls.ConnectionState) (packet *postman.TRPPacket, err error) {
 	var base *trisa.Payload
 
 	if base, err = s.latestPayload(ctx, envelopeID); err != nil {
-		return err
+		return nil, err
 	}
 
-	var payload *trisa.Payload
+	return postman.ReceiveTRPResolution(envelopeID, base, in, mtls)
+}
 
-	if payload, err = postman.PayloadFromResolution(base, in); err != nil {
-		return err
-	}
-
-	transferState := trisa.TransferAccepted
-
-	if in.Rejected != "" {
-		transferState = trisa.TransferRejected
-	}
-
-	var env *envelope.Envelope
-
-	opts := []envelope.Option{
-		envelope.WithEnvelopeID(envelopeID.String()),
-		envelope.WithTransferState(transferState),
-	}
-
-	if env, err = envelope.New(payload, opts...); err != nil {
-		return fmt.Errorf("could not create incoming trp resolution envelope: %w", err)
-	}
-
-	var storageKey keys.PublicKey
-
-	if storageKey, err = s.trisa.StorageKey("", counterparty.CommonName); err != nil {
-		return fmt.Errorf("could not get storage key for trp resolution: %w", err)
-	}
-
-	if env, _, err = env.Encrypt(); err != nil {
-		return fmt.Errorf("could not encrypt trp resolution: %w", err)
-	}
-
-	if env, _, err = env.Seal(envelope.WithSealingKey(storageKey)); err != nil {
-		return fmt.Errorf("could not seal trp resolution: %w", err)
-	}
-
-	model := env.Proto()
-	validHMAC, _ := env.ValidateHMAC()
-	timestamp, _ := env.Timestamp()
-
-	return db.AddEnvelope(&models.SecureEnvelope{
-		EnvelopeID:    envelopeID,
-		Direction:     enum.DirectionIncoming,
-		Remote:        sql.NullString{Valid: counterparty.CommonName != "", String: counterparty.CommonName},
-		IsError:       false,
-		EncryptionKey: model.EncryptionKey,
-		HMACSecret:    model.HmacSecret,
-		ValidHMAC:     sql.NullBool{Valid: true, Bool: validHMAC},
-		PublicKey:     sql.NullString{Valid: model.PublicKeySignature != "", String: model.PublicKeySignature},
-		TransferState: int32(model.TransferState),
-		Timestamp:     timestamp,
-		Envelope:      model,
-	}, &models.ComplianceAuditLog{
-		ChangeNotes: sql.NullString{Valid: true, String: "Server.Resolve()"},
-	})
+// notifyResolution posts a resolution to the compliance callback so that the operator
+// who sent the inquiry learns the counterparty's decision; without it the node knows the
+// transfer was accepted or rejected and the back office that originated it does not.
+//
+// This is a notification, not a decision, which is the difference between it and
+// WebhookInquiry. On an inquiry the reply is what this node answers the counterparty
+// with; here the counterparty has already decided and the decision is committed before
+// this is called. The signature is what keeps it that way: the only arguments are the
+// request to post and a logger, so the packet, the prepared transaction and the
+// transaction model are all out of reach, there is no return value to carry a verdict
+// back to the handler, and the *webhook.Reply is dropped. A callback therefore has no
+// path by which it could move the stored status.
+//
+// Errors are logged rather than returned for the same reason the TRISA server swallows
+// them: the counterparty is owed its 204 whether or not the operator's callback is
+// reachable, and the resolution is already durable.
+func (s *Server) notifyResolution(ctx context.Context, request *webhook.Request, log zerolog.Logger) {
+	// Delivered off the request goroutine, and on a context detached from it.
+	//
+	// The webhook client allows 30 seconds and this server's WriteTimeout is 20, so a
+	// slow back office would otherwise cost the counterparty its 204 on a resolution
+	// this node has already committed. The counterparty's send then fails, and its
+	// retry gets a 409 because the transfer is no longer pending: the two nodes end up
+	// disagreeing about a decision that was in fact recorded. The counterparty's
+	// acknowledgement must not depend on how fast our operator's endpoint answers.
+	//
+	// The cost of that choice is that a notification in flight when the process stops
+	// is lost. Making it durable means an outbox in the node, which is a larger change
+	// than this one; until then a missed callback is recoverable from the envelope
+	// trail, while an unacknowledged resolution is not.
+	go func() {
+		if _, err := s.webhook.Callback(ctx, request); err != nil {
+			log.Error().Err(err).Msg("could not execute webhook callback")
+		}
+	}()
 }
