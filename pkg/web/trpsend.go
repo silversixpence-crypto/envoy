@@ -21,6 +21,7 @@ import (
 	"github.com/trisacrypto/envoy/pkg/postman"
 	"github.com/trisacrypto/envoy/pkg/store/models"
 	"github.com/trisacrypto/envoy/pkg/trp/callback"
+	trpclient "github.com/trisacrypto/envoy/pkg/trp/client"
 	"github.com/trisacrypto/trisa/pkg/openvasp/client"
 	"github.com/trisacrypto/trisa/pkg/openvasp/trp/v3"
 	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
@@ -77,7 +78,7 @@ func (s *Server) SendTRP(ctx context.Context, p *postman.TRPPacket) (err error) 
 
 	var trpc *client.Client
 
-	if trpc, err = client.New(); err != nil {
+	if trpc, err = trpclient.New(); err != nil {
 		return err
 	}
 
@@ -151,7 +152,7 @@ func (s *Server) SendTRPResolution(ctx context.Context, p *postman.TRISAPacket) 
 
 	var trpc *client.Client
 
-	if trpc, err = client.New(); err != nil {
+	if trpc, err = trpclient.New(); err != nil {
 		return err
 	}
 
@@ -215,7 +216,7 @@ func (s *Server) SendTRPConfirmation(ctx context.Context, p *postman.TRISAPacket
 
 	var trpc *client.Client
 
-	if trpc, err = client.New(); err != nil {
+	if trpc, err = trpclient.New(); err != nil {
 		return err
 	}
 

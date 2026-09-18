@@ -76,12 +76,19 @@ type Webhook struct {
 	authKey []byte
 }
 
+// Only the encodings this client actually reads are advertised. Callback receivers sit
+// behind CDNs that take an Accept-Encoding at its word, and the q-value list this used
+// to send ("gzip;q=1.0, deflate;q=0.8, identity;q=0.5, compress;q=0.1, *;q=0") invited
+// deflate, compress and anything else the edge fancied. The switch below reads gzip
+// with compress/gzip; its deflate and compress branches guess at framing that real
+// servers vary on, so they are no longer requested. Note that setting the header at all
+// disables net/http's transparent gzip, which is why Callback decodes gzip itself.
 const (
 	userAgent      = "Envoy Webhook Client/v1"
 	contentType    = "application/json; charset=utf-8"
 	accept         = "application/json"
 	acceptLang     = "en-US,en"
-	acceptEncode   = "gzip;q=1.0, deflate;q=0.8, identity;q=0.5, compress;q=0.1, *;q=0"
+	acceptEncode   = "gzip, identity"
 	gzipEncode     = "gzip"
 	zlibEncode     = "deflate"
 	lzwEncode      = "compress"

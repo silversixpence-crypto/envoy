@@ -1,12 +1,14 @@
 package api_test
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/trisacrypto/envoy/pkg/web/api/v1"
@@ -167,6 +169,51 @@ func TestDeleteTransaction(t *testing.T) {
 
 	err := client.DeleteTransaction(ctx, uuid.MustParse("3b0ed85d-5eb4-406f-abca-57b199453343"))
 	require.NoError(t, err, "could not execute delete transaction request")
+}
+
+// The client does not set Accept-Encoding, so net/http negotiates gzip on its own and
+// decompresses the reply before the json decoder sees it. This used to be broken: the
+// client advertised "gzip, deflate, br" and decoded nothing, so a CDN in front of the
+// API (Cloudflare, in the hosted deployment) gzipped the JSON and every call failed.
+func TestTransparentGzip(t *testing.T) {
+	fixture := &api.StatusReply{}
+	err := loadFixture("testdata/status.json", fixture)
+	require.NoError(t, err, "could not load status fixture")
+
+	var accept string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept = r.Header.Get("Accept-Encoding")
+
+		w.Header().Add("Content-Type", "application/json; charset=utf-8")
+
+		// Stand in for a CDN: compress only what the request says it accepts.
+		if !strings.Contains(accept, "gzip") {
+			json.NewEncoder(w).Encode(fixture)
+			return
+		}
+
+		w.Header().Set("Content-Encoding", "gzip")
+
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+
+		json.NewEncoder(gz).Encode(fixture)
+	}))
+
+	t.Cleanup(ts.Close)
+
+	client, err := api.New(ts.URL)
+	require.NoError(t, err, "could not create api client")
+
+	rep, err := client.Status(ctx)
+	require.NoError(t, err, "could not execute status request against a gzipping server")
+	require.Equal(t, fixture, rep, "expected reply to be equal to the fixture")
+
+	// The transport adds exactly "gzip" when the caller leaves the header alone; any
+	// other value here means something set Accept-Encoding again and turned off the
+	// transparent decompression this test relies on.
+	require.Equal(t, "gzip", accept, "expected the transport's own accept-encoding header")
 }
 
 type testServerConfig struct {

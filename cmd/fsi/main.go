@@ -23,6 +23,7 @@ import (
 	pb "github.com/trisacrypto/trisa/pkg/trisa/gds/models/v1beta1"
 
 	"github.com/trisacrypto/envoy/pkg"
+	trpclient "github.com/trisacrypto/envoy/pkg/trp/client"
 	"github.com/trisacrypto/envoy/pkg/web/api/v1"
 
 	"github.com/joho/godotenv"
@@ -607,7 +608,7 @@ func connectCounterparty(c *cli.Context) (err error) {
 }
 
 func connectTRP(c *cli.Context) (err error) {
-	if trpClient, err = openvasp.New(); err != nil {
+	if trpClient, err = trpclient.New(); err != nil {
 		return cli.Exit(fmt.Errorf("could not create trp client: %w", err), 1)
 	}
 	return nil
