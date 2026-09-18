@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -222,6 +223,119 @@ func TestConnectionParams(t *testing.T) {
 		info, err := os.Stat(path + "-wal")
 		require.True(t, err != nil || info.Size() == 0, "expected the write-ahead log to be empty or gone after a checkpoint")
 	})
+}
+
+// Most write transactions in this package read before they write. A deferred BEGIN takes
+// only a read lock at the first SELECT, so the first write has to upgrade it, and in WAL
+// mode SQLite refuses that upgrade with SQLITE_BUSY_SNAPSHOT as soon as another
+// connection has committed since the snapshot was taken. It is not a wait that _busy_-
+// timeout can absorb: the snapshot is already stale, so the busy handler is never
+// consulted and the caller sees "database is locked" immediately. The store opens write
+// transactions on a pool that begins them with BEGIN IMMEDIATE instead, which turns the
+// failure into ordinary lock contention that the busy handler waits out.
+func TestConcurrentReadThenWrite(t *testing.T) {
+	const (
+		workers = 8
+		txns    = 40
+	)
+
+	// Runs workers*txns read-then-write transactions against a fresh database opened
+	// with the given DSN query string and returns every error they produced.
+	probe := func(t *testing.T, options string) (errs []error) {
+		t.Helper()
+
+		uri, err := dsn.Parse("sqlite3:///" + filepath.Join(t.TempDir(), "test.db") + options)
+		require.NoError(t, err, "could not parse the dsn")
+
+		store, err := db.Open(uri)
+		require.NoError(t, err, "could not open connection to temporary sqlite database")
+		defer store.Close()
+
+		setup, err := store.BeginTx(context.Background(), nil)
+		require.NoError(t, err, "could not open the setup transaction")
+		defer setup.Rollback()
+
+		_, err = setup.Exec("CREATE TABLE lock_probe (id INTEGER PRIMARY KEY, val INTEGER NOT NULL)")
+		require.NoError(t, err, "could not create the scratch table")
+
+		_, err = setup.Exec("INSERT INTO lock_probe (val) VALUES (0)")
+		require.NoError(t, err, "could not seed the scratch table")
+		require.NoError(t, setup.Commit(), "could not commit the setup transaction")
+
+		var (
+			mu    sync.Mutex
+			wg    sync.WaitGroup
+			start = make(chan struct{})
+		)
+
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+				<-start
+
+				for j := 0; j < txns; j++ {
+					if err := readThenWrite(store); err != nil {
+						mu.Lock()
+						errs = append(errs, err)
+						mu.Unlock()
+					}
+				}
+			}()
+		}
+
+		// Release the workers together so that the transactions actually overlap.
+		close(start)
+		wg.Wait()
+
+		return errs
+	}
+
+	t.Run("Immediate", func(t *testing.T) {
+		errs := probe(t, "")
+		require.Empty(t, errs, "expected every write transaction to commit, got %d failures (first: %v)", len(errs), firstErr(errs))
+	})
+
+	t.Run("Deferred", func(t *testing.T) {
+		// The same workload with the driver's default deferred BEGIN, which is what the
+		// store did before the pools were split. This documents the mechanism: the
+		// failures here are exactly the ones the immediate write pool removes.
+		errs := probe(t, "?_txlock=deferred")
+		t.Logf("%d of %d deferred transactions failed the lock upgrade", len(errs), workers*txns)
+		require.NotEmpty(t, errs, "expected deferred transactions to fail the lock upgrade")
+		require.ErrorContains(t, firstErr(errs), "database is locked", "expected the failures to be lock upgrade failures")
+	})
+}
+
+// One write transaction that reads before it writes, which is the shape every
+// read-modify-write store method in this package has.
+func readThenWrite(store *db.Store) (err error) {
+	var tx *db.Tx
+	if tx, err = store.BeginTx(context.Background(), nil); err != nil {
+		return err
+	}
+
+	defer tx.Rollback()
+
+	var val int
+	if err = tx.QueryRow("SELECT val FROM lock_probe ORDER BY id DESC LIMIT 1").Scan(&val); err != nil {
+		return err
+	}
+
+	if _, err = tx.Exec("INSERT INTO lock_probe (val) VALUES (?)", val+1); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func firstErr(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+
+	return errs[0]
 }
 
 // Returns the first column of the given pragma query as a string.
