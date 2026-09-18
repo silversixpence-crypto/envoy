@@ -993,11 +993,10 @@ func (s *APIv1) Delete(ctx context.Context, endpoint string) (err error) {
 //===========================================================================
 
 const (
-	userAgent    = "Envoy API Client/v1"
-	accept       = "application/json"
-	acceptLang   = "en-US,en"
-	acceptEncode = "gzip, deflate, br"
-	contentType  = "application/json; charset=utf-8"
+	userAgent   = "Envoy API Client/v1"
+	accept      = "application/json"
+	acceptLang  = "en-US,en"
+	contentType = "application/json; charset=utf-8"
 )
 
 func (s *APIv1) NewRequest(ctx context.Context, method, path string, data interface{}, params *url.Values) (req *http.Request, err error) {
@@ -1024,10 +1023,17 @@ func (s *APIv1) NewRequest(ctx context.Context, method, path string, data interf
 	}
 
 	// Set the headers on the request
+	//
+	// Accept-Encoding is deliberately not set. This client used to advertise
+	// "gzip, deflate, br" and then hand the body straight to a json.Decoder, so a CDN
+	// in front of the API (Cloudflare, in the hosted deployment) would gzip the reply
+	// and decoding failed on "invalid character '\x1f'". net/http's transport
+	// negotiates and decompresses gzip for us, but only when the caller leaves
+	// Accept-Encoding unset: it then adds its own header, decodes the response and
+	// reports it with Response.Uncompressed. Setting the header turns that off.
 	req.Header.Add("User-Agent", userAgent)
 	req.Header.Add("Accept", accept)
 	req.Header.Add("Accept-Language", acceptLang)
-	req.Header.Add("Accept-Encoding", acceptEncode)
 	req.Header.Add("Content-Type", contentType)
 
 	// If there is a request ID on the context, set it on the request, otherwise generate one
