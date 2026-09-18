@@ -20,6 +20,7 @@ import (
 	"github.com/trisacrypto/envoy/pkg/trisa/network"
 	"github.com/trisacrypto/envoy/pkg/trp"
 	"github.com/trisacrypto/envoy/pkg/trp/callback"
+	"github.com/trisacrypto/envoy/pkg/webhook"
 	"github.com/trisacrypto/trisa/pkg/openvasp"
 
 	"github.com/google/uuid"
@@ -41,9 +42,22 @@ const (
 	testCallbackKey = "b1f8ad0a9a1c32ec19a24b0cbc1e5b0fdc5dd3ad4ee62b9b09b8b3b8fdd4a9c7"
 )
 
-// newTestServer starts a TRP server backed by a mock store; the returned store is the
-// one the handlers use so that a test can assert which calls reached the database.
+// newTestServer starts a TRP server backed by a mock store and no compliance callback;
+// the returned store is the one the handlers use so that a test can assert which calls
+// reached the database.
 func newTestServer(t *testing.T, allowUnauthenticated bool) (*httptest.Server, *storemock.Store) {
+	t.Helper()
+
+	srv, mockStore, _ := newTestNode(t, allowUnauthenticated, nil)
+
+	return srv, mockStore
+}
+
+// newTestNode is newTestServer with the compliance callback handler under the test's
+// control; a nil hook is a node with no webhook configured. The mocked TRISA network is
+// returned as well because its keychain is what seals the stored envelopes the handlers
+// read back, so a test that needs a transfer history has to use the same keys.
+func newTestNode(t *testing.T, allowUnauthenticated bool, hook webhook.Handler) (*httptest.Server, *storemock.Store, network.Network) {
 	t.Helper()
 
 	conf := config.Config{
@@ -80,13 +94,13 @@ func newTestServer(t *testing.T, allowUnauthenticated bool) (*httptest.Server, *
 	require.NoError(t, err, "could not create a mocked trisa network")
 
 	inner := &http.Server{}
-	_, err = trp.Debug(conf, db, net, nil, inner)
+	_, err = trp.Debug(conf, db, net, hook, inner)
 	require.NoError(t, err, "could not create the trp server")
 
 	srv := httptest.NewServer(inner.Handler)
 	t.Cleanup(srv.Close)
 
-	return srv, mockStore
+	return srv, mockStore, net
 }
 
 // post sends a TRP request with the headers the core protocol requires.

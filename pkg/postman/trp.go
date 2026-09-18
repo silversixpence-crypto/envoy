@@ -122,6 +122,56 @@ func ReceiveTRPConfirmation(envelopeID uuid.UUID, base *trisa.Payload, in *trp.C
 	return packet, nil
 }
 
+// ReceiveTRPResolution records an inbound TRP resolution (the beneficiary approving or
+// rejecting an inquiry this node sent) as the incoming half of a packet. A resolution is
+// acknowledged with an empty 204, so like a confirmation the packet has no outgoing
+// message; base is the payload of the last message stored for the transfer, from which
+// the identity and the reference transaction are carried over.
+//
+// Only a decision can be recorded this way: a version-only resolution is an
+// acknowledgement with nothing to store, and PayloadFromResolution rejects it.
+func ReceiveTRPResolution(envelopeID uuid.UUID, base *trisa.Payload, in *trp.Resolution, mtls *tls.ConnectionState) (packet *TRPPacket, err error) {
+	packet = &TRPPacket{
+		Packet: Packet{
+			In:      &Incoming{},
+			Out:     &Outgoing{},
+			request: enum.DirectionIncoming,
+			reply:   enum.DirectionOutgoing,
+		},
+		info:       in.Info,
+		mtls:       mtls,
+		message:    in,
+		envelopeID: envelopeID,
+	}
+
+	// Add parent to submessages
+	packet.In.packet = &packet.Packet
+	packet.Out.packet = &packet.Packet
+
+	if packet.payload, err = PayloadFromResolution(base, in); err != nil {
+		return nil, err
+	}
+
+	transferState := trisa.TransferAccepted
+
+	if in.Rejected != "" {
+		transferState = trisa.TransferRejected
+	}
+
+	opts := []envelope.Option{
+		envelope.WithEnvelopeID(envelopeID.String()),
+		envelope.WithTransferState(transferState),
+	}
+
+	if packet.In.Envelope, err = envelope.New(packet.payload, opts...); err != nil {
+		return nil, fmt.Errorf("could not create incoming trp resolution envelope: %w", err)
+	}
+
+	packet.In.original = packet.In.Envelope.Proto()
+	packet.Packet.resolver = packet
+	return packet, nil
+}
+
 // Resolve prepares the outgoing half of an inbound inquiry from the resolution this node
 // is replying with. An approval and a rejection are terminal decisions and are recorded
 // as such, so that the transaction reaches accepted or rejected through the ordinary
