@@ -25,6 +25,7 @@ var (
 	ErrNotFound             = errors.New("resource not found")
 	ErrUnavailable          = errors.New("could not connect to remote counterparty; please try again later")
 	ErrDisabled             = errors.New("the protocol used to send to the counterparty is currently disabled")
+	ErrEnvelopeExists       = errors.New("a transaction with this envelope id already exists")
 	ErrNotAllowed           = errors.New("the requested action is not allowed")
 	ErrExpiredToken         = errors.New("the verification token is expired")
 	ErrNoTransactionPayload = errors.New("no transaction payload found in latest secure envelope")

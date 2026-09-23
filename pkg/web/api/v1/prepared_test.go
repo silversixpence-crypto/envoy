@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	. "github.com/trisacrypto/envoy/pkg/web/api/v1"
 	"github.com/trisacrypto/trisa/pkg/ivms101"
+	generic "github.com/trisacrypto/trisa/pkg/trisa/data/generic/v1beta1"
 )
 
 func TestRoutingValidate(t *testing.T) {
@@ -192,4 +194,65 @@ func TestParseNationalIdentifierType(t *testing.T) {
 		identification := &Identification{TypeCode: tc.input}
 		require.Equal(t, tc.expected, identification.NationalIdentifierTypeCode(), "test case %d failed", i)
 	}
+}
+
+func TestPreparedEnvelopeID(t *testing.T) {
+	valid := func(id string) *Prepared {
+		return &Prepared{
+			EnvelopeID:  id,
+			Routing:     &Routing{Protocol: "trp", TravelAddress: "ta2CdjAHciVXahu8sPNTbtGkD6BnaVq4WKcHG6ks2RB4nN4YEvtGMviaNXxsgFWEPV58HtC"},
+			Identity:    &ivms101.IdentityPayload{},
+			Transaction: &generic.Transaction{},
+		}
+	}
+
+	t.Run("Omitted", func(t *testing.T) {
+		prepared := valid("")
+		require.NoError(t, prepared.Validate())
+
+		_, ok := prepared.EnvelopeUUID()
+		require.False(t, ok, "no envelope id should mean the node generates one")
+	})
+
+	t.Run("Valid", func(t *testing.T) {
+		for _, id := range []string{
+			"5f1a6bcb-4e2b-4a9d-bc9f-3e9a2d3f5c11",
+			"5F1A6BCB-4E2B-4A9D-BC9F-3E9A2D3F5C11",
+		} {
+			prepared := valid(id)
+			require.NoError(t, prepared.Validate(), "expected %q to be valid", id)
+
+			parsed, ok := prepared.EnvelopeUUID()
+			require.True(t, ok)
+			require.Equal(t, uuid.MustParse(id), parsed)
+		}
+	})
+
+	t.Run("Invalid", func(t *testing.T) {
+		expected := ValidationError(nil, IncorrectField("envelope_id", "must be a version 4 uuid in its canonical 36 character form"))
+
+		for _, id := range []string{
+			"not-a-uuid",
+			"00000000-0000-0000-0000-000000000000",          // nil uuid
+			"6ba7b810-9dad-11d1-80b4-00c04fd430c8",          // version 1
+			"017f22e2-79b0-7cc3-98c4-dc0c0c07398f",          // version 7
+			"{5f1a6bcb-4e2b-4a9d-bc9f-3e9a2d3f5c11}",        // braced form
+			"urn:uuid:5f1a6bcb-4e2b-4a9d-bc9f-3e9a2d3f5c11", // urn form
+			"5f1a6bcb4e2b4a9dbc9f3e9a2d3f5c11",              // no hyphens
+			"5f1a6bcb-4e2b-4a9d-7c9f-3e9a2d3f5c11",          // not the rfc 4122 variant
+		} {
+			require.Equal(t, expected, valid(id).Validate(), "expected %q to be invalid", id)
+		}
+	})
+
+	t.Run("JSON", func(t *testing.T) {
+		prepared := &Prepared{}
+		require.NoError(t, json.Unmarshal([]byte(`{"envelope_id": "5f1a6bcb-4e2b-4a9d-bc9f-3e9a2d3f5c11"}`), prepared))
+		require.Equal(t, "5f1a6bcb-4e2b-4a9d-bc9f-3e9a2d3f5c11", prepared.EnvelopeID)
+
+		// The prepare endpoint returns a Prepared; it must not grow an empty id field.
+		data, err := json.Marshal(&Prepared{})
+		require.NoError(t, err)
+		require.NotContains(t, string(data), "envelope_id")
+	})
 }
