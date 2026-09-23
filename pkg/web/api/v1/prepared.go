@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/trisacrypto/envoy/pkg/enum"
 	"github.com/trisacrypto/trisa/pkg/ivms101"
 	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
@@ -21,6 +22,12 @@ type Prepare struct {
 }
 
 type Prepared struct {
+	// EnvelopeID optionally lets the caller choose the id of the transfer, which is
+	// both the envelope id and the transaction id. It must be a version 4 UUID. A
+	// send-prepared request with an id that already exists does not send again but
+	// returns the transaction the first request created, so a caller that timed out
+	// can safely retry. If empty, the node generates the id as usual.
+	EnvelopeID  string                   `json:"envelope_id,omitempty"`
 	Routing     *Routing                 `json:"routing"`
 	Identity    *ivms101.IdentityPayload `json:"identity"`
 	Transaction *generic.Transaction     `json:"transaction"`
@@ -202,7 +209,30 @@ func (p *Prepared) Validate() (err error) {
 		err = ValidationError(err, MissingField("transaction"))
 	}
 
+	if p.EnvelopeID != "" {
+		if _, ok := p.EnvelopeUUID(); !ok {
+			err = ValidationError(err, IncorrectField("envelope_id", "must be a version 4 uuid in its canonical 36 character form"))
+		}
+	}
+
 	return err
+}
+
+// EnvelopeUUID returns the caller supplied envelope id and true if it is a canonical
+// version 4 UUID; otherwise it returns false (including when no id was supplied).
+func (p *Prepared) EnvelopeUUID() (id uuid.UUID, ok bool) {
+	var err error
+	if id, err = uuid.Parse(p.EnvelopeID); err != nil {
+		return uuid.Nil, false
+	}
+
+	// uuid.Parse also accepts the braced, urn and 32 character forms; only accept the
+	// canonical form so that the id the caller holds is exactly the one that is stored.
+	if id.Version() != 4 || id.Variant() != uuid.RFC4122 || id.String() != strings.ToLower(p.EnvelopeID) {
+		return uuid.Nil, false
+	}
+
+	return id, true
 }
 
 //===========================================================================
