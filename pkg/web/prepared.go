@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+	"github.com/google/uuid"
 	"github.com/trisacrypto/trisa/pkg/ivms101"
 	trisa "github.com/trisacrypto/trisa/pkg/trisa/api/v1beta1"
 )
@@ -135,11 +136,30 @@ func (s *Server) SendPreparedTransaction(c *gin.Context) {
 		return
 	}
 
+	// Use the envelope id chosen by the caller, if any, which makes the send idempotent.
+	envelopeID, idempotent := in.EnvelopeUUID()
+	if !idempotent {
+		envelopeID = uuid.New()
+	}
+
 	// Send the transfer to the counterparty and get the secure envelope response
 	// NOTE: Send handles any error response that needs to be sent to the user.
 	// WARNING: Send commits/rollsback the database transaction from the packet.
-	if packet, err = s.Send(c, in.Routing, payload); err != nil {
-		return
+	if packet, err = s.SendWithID(c, envelopeID, idempotent, in.Routing, payload); err != nil {
+		if !errors.Is(err, ErrEnvelopeExists) {
+			return
+		}
+
+		// A repeat of an earlier send is answered with the transaction it created
+		// (below, with a 200 since nothing was created), without sending again. An id
+		// that belongs to any other transaction is a conflict.
+		if !repeatedSend(packet.Transaction, packet.Counterparty, payload) {
+			c.Error(err)
+			c.JSON(http.StatusConflict, api.Error("envelope_id is already in use by a different transaction"))
+			return
+		}
+
+		packet.Log.Info().Msg("repeated send prepared request answered with the existing transaction")
 	}
 
 	// Create the API response to send back to the user

@@ -2528,6 +2528,10 @@ components:
       type: object
       description: The prepared object is the data representation that you need to start a new travel rule transaction. It can be created using a Prepare, and then this payload can be sent to the send-prepared endpoint to initiate a travel rule transfer by creating a transaction and sending a secure envelope with the payload to the counterparty.
       properties:
+        envelope_id:
+          type: string
+          format: uuid
+          description: "Optional id for the transfer, used as both the envelope id and the transaction id. Must be a version 4 UUID in canonical form. If a transaction with this id already exists, send-prepared does not send again: a repeat of the same transfer returns the existing transaction with a 200, and an id used by any other transaction is a 409. If omitted the node generates the id."
         routing:
           $ref: "#/components/schemas/Routing"
         identity:
