@@ -32,7 +32,9 @@ The entrypoint is `docker/hosted/entrypoint.sh`. Four steps, each logged with a
 
 1. Decode the secrets from the environment into `/run/node` (directory 0700, files
    0600) and export the `TRISA_*` variables that point at them.
-2. `litestream restore -if-db-not-exists -if-replica-exists /data/trisa.db`.
+2. Pick the storage credential mode (see [Storage credentials](#storage-credentials)),
+   fetch credentials once in process mode, then
+   `litestream restore -if-db-not-exists -if-replica-exists /data/trisa.db`.
 3. Check that a database now exists. If not, demand `NODE_BOOTSTRAP=1`.
    3b. On the bootstrap path only, and only when `NODE_BOOTSTRAP_CALLBACK_URL` is set:
    mint the node's first API key and POST it to that URL. See
@@ -42,6 +44,77 @@ The entrypoint is `docker/hosted/entrypoint.sh`. Four steps, each logged with a
 
 Step 3 logs which of three paths the node took: `restored`, `existing-volume` or
 `bootstrap`. That line is the one to grep for when a node comes up empty.
+
+## Storage credentials
+
+Litestream reaches the bucket through the AWS SDK for Go v1, and the node gets its
+credentials for that one of two ways. The entrypoint picks the mode explicitly in step 2
+and logs `mode=process` or `mode=static`.
+
+### Process mode (Cloudflare)
+
+Chosen when `NODE_STORAGE_CREDENTIALS_URL` is set. The Worker issues each node R2
+credentials scoped to its own prefix, valid for 24 hours and rotated at 18. Environment
+variables are read once, so they could only be rotated by restarting the container.
+Instead:
+
+- `Dockerfile.hosted` installs `/etc/aws/config` with
+  `credential_process = /usr/local/bin/storage-credentials` under `[default]`, and sets
+  `AWS_CONFIG_FILE=/etc/aws/config` and `AWS_SDK_LOAD_CONFIG=1`.
+- The SDK runs the helper when Litestream first needs credentials and again whenever
+  the `Expiration` it returned has passed. New keys are picked up with no restart and no
+  failed requests.
+
+The contract with the Worker:
+
+- The container gets `NODE_STORAGE_CREDENTIALS_URL` (`<public_base>/_storage-credentials`)
+  and `NODE_STORAGE_CREDENTIALS_TOKEN` (64 hex characters).
+- `GET $NODE_STORAGE_CREDENTIALS_URL` with `Authorization: Bearer
+  $NODE_STORAGE_CREDENTIALS_TOKEN` answers 200 with exactly the credential_process
+  document: `{"Version":1,"AccessKeyId":…,"SecretAccessKey":…,"SessionToken":…,"Expiration":…}`.
+  401, 503 or 410 otherwise.
+
+The helper (`docker/hosted/storage-credentials.sh`) reads the token from the
+environment each time it runs and hands it to curl through a 0600 config file in a
+private temporary directory that is removed on exit, so the token never appears in a
+process argument list. It allows 5 seconds to connect and 15 in total, treats anything
+but a 200 as failure (redirects are not followed), checks that the body has
+`"Version":1`, an `AccessKeyId` and a `SecretAccessKey`, and then prints the body
+unchanged. On failure it exits 1 with one line on stderr naming the URL and the HTTP
+status or connection error, never the token or the body.
+
+At boot the entrypoint:
+
+1. Requires `NODE_STORAGE_CREDENTIALS_TOKEN`; missing, exit 1.
+2. Refuses to start if any of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+   `AWS_SESSION_TOKEN` (or the SDK's aliases `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`),
+   `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` or
+   `AWS_SHARED_CREDENTIALS_FILE` is set. See below.
+3. Refuses to start if `AWS_CONFIG_FILE` no longer points at `/etc/aws/config`,
+   `AWS_SDK_LOAD_CONFIG` is empty, or `AWS_PROFILE` names a profile other than
+   `default`. Any of those would stop the SDK from ever running the helper.
+4. Runs the helper once before `litestream restore`, discarding the credentials and
+   logging only their `Expiration`. A wrong URL or token fails here with
+   `storage credentials preflight failed`, not as an opaque credential error inside
+   Litestream.
+
+**Why the AWS_* keys must not be set in process mode.** The SDK's credential chain
+tries the environment before the shared config file, and Litestream copies
+`LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY` into `AWS_*` when it
+starts. With any of them present the helper never runs: the node would replicate with
+the static keys, look healthy, and stop replicating when those keys expired or were
+revoked, with nothing at boot to say why. So the entrypoint treats the combination as a
+configuration error.
+
+### Static mode (local bench, VPS)
+
+Chosen when `NODE_STORAGE_CREDENTIALS_URL` is unset. Keys come from
+`LITESTREAM_ACCESS_KEY_ID` / `LITESTREAM_SECRET_ACCESS_KEY` or the `AWS_*` variables
+and are read once, as before process mode existed. The entrypoint unsets the image's
+`AWS_CONFIG_FILE` and `AWS_SDK_LOAD_CONFIG` in this mode so the SDK behaves exactly as
+it did before the image carried a config file. An operator who sets `AWS_CONFIG_FILE`
+to a different file keeps it. The log line lists which key variables were present, by
+name only.
 
 ## The bootstrap callback
 
@@ -105,6 +178,9 @@ check below exists to prevent that.
   for this node and NODE_BOOTSTRAP is not set`. This is the guard against a typo in
   `LITESTREAM_PATH` quietly starting a brand new node under someone else's slug.
 - `LITESTREAM_BUCKET`, `LITESTREAM_PATH` or `LITESTREAM_ENDPOINT` missing: exit 1.
+- Process mode with a missing token, an `AWS_*` or `LITESTREAM_*` key also set, or a
+  failed credentials preflight: exit 1, before Litestream runs. See
+  [Storage credentials](#storage-credentials).
 - `NODE_BOOTSTRAP_CALLBACK_URL` is set and the callback fails every attempt: exit 1.
   The node would otherwise serve, and replicate, a database whose only API key was
   printed into a log line nobody read.
@@ -135,8 +211,10 @@ bind-mounts the files instead of passing them through the environment.
 | `LITESTREAM_PATH` | none, required | Prefix inside the bucket. One node, one prefix, forever. |
 | `LITESTREAM_ENDPOINT` | none, required | S3 endpoint URL. `https://<account>.r2.cloudflarestorage.com` for R2, `http://rustfs:9000` on the local bench. Plain HTTP is accepted. |
 | `LITESTREAM_REGION` | `us-east-1` | Region. R2 ignores it; the SDK still wants one. |
-| `LITESTREAM_ACCESS_KEY_ID` | none, required | Read by Litestream itself, never named in `litestream.yml`. |
-| `LITESTREAM_SECRET_ACCESS_KEY` | none, required | As above. |
+| `NODE_STORAGE_CREDENTIALS_URL` | none | Selects process mode. The Worker's `<public_base>/_storage-credentials` endpoint. See [Storage credentials](#storage-credentials). |
+| `NODE_STORAGE_CREDENTIALS_TOKEN` | with the URL | Bearer token for that endpoint. Missing while the URL is set: exit 1. |
+| `LITESTREAM_ACCESS_KEY_ID` | static mode only | Read by Litestream itself, never named in `litestream.yml`. Set in process mode: exit 1. |
+| `LITESTREAM_SECRET_ACCESS_KEY` | static mode only | As above. |
 | `NODE_BOOTSTRAP` | `0` | `1` allows the node to start with an empty prefix. First boot only. |
 
 ### Bootstrap callback

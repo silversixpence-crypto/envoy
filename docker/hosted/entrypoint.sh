@@ -3,7 +3,9 @@
 # Hosted Envoy node entrypoint.
 #
 #   1. materialise the node's secrets from the environment into /run/node
-#   2. restore /data/trisa.db from the Litestream replica (fail closed)
+#   2. pick the storage credential mode (process or static) and, in process mode,
+#      fetch credentials once as a preflight; then restore /data/trisa.db from the
+#      Litestream replica (fail closed)
 #   3. refuse to start on a blank database unless NODE_BOOTSTRAP=1
 #   3b. on the bootstrap path only, mint the first API key and POST it to
 #       NODE_BOOTSTRAP_CALLBACK_URL (fail closed)
@@ -144,6 +146,79 @@ export LITESTREAM_REGION
 [ -n "${LITESTREAM_BUCKET-}" ] || die "LITESTREAM_BUCKET is required"
 [ -n "${LITESTREAM_PATH-}" ] || die "LITESTREAM_PATH is required"
 [ -n "${LITESTREAM_ENDPOINT-}" ] || die "LITESTREAM_ENDPOINT is required"
+
+# Storage credentials come one of two ways, and the choice is explicit:
+#
+#   process  NODE_STORAGE_CREDENTIALS_URL is set. The AWS SDK inside Litestream runs
+#            /usr/local/bin/storage-credentials (named in /etc/aws/config) and runs it
+#            again whenever the credentials it returned expire, so the Worker can
+#            rotate them without restarting the container.
+#   static   otherwise. Keys come from the environment (LITESTREAM_* or AWS_*), read
+#            once, exactly as before process mode existed. The local bench uses this.
+#
+# `litestream restore` below and `litestream replicate` in step 4 go through the same
+# SDK credential chain, so both modes cover both.
+STORAGE_CREDENTIALS_HELPER=/usr/local/bin/storage-credentials
+IMAGE_AWS_CONFIG=/etc/aws/config
+
+if [ -n "${NODE_STORAGE_CREDENTIALS_URL-}" ]; then
+    [ -n "${NODE_STORAGE_CREDENTIALS_TOKEN-}" ] || die "NODE_STORAGE_CREDENTIALS_URL is set but NODE_STORAGE_CREDENTIALS_TOKEN is not"
+
+    # Credentials in the environment (or a shared credentials file) come before
+    # credential_process in the SDK's chain. Litestream copies LITESTREAM_* keys into
+    # AWS_* at startup. Any of them would silently shadow the rotating credentials
+    # until they expired, so refuse to start instead.
+    _shadow=""
+
+    for _var in AWS_ACCESS_KEY_ID AWS_ACCESS_KEY AWS_SECRET_ACCESS_KEY AWS_SECRET_KEY AWS_SESSION_TOKEN \
+        LITESTREAM_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY AWS_SHARED_CREDENTIALS_FILE; do
+        eval "_val=\${$_var-}"
+        [ -z "$_val" ] || _shadow="$_shadow $_var"
+    done
+
+    unset _val
+
+    [ -z "$_shadow" ] || die "NODE_STORAGE_CREDENTIALS_URL is set but so is$_shadow; these would shadow the process credentials in the AWS SDK. Set one or the other, not both"
+
+    [ "${AWS_CONFIG_FILE-}" = "$IMAGE_AWS_CONFIG" ] || die "NODE_STORAGE_CREDENTIALS_URL is set but AWS_CONFIG_FILE is '${AWS_CONFIG_FILE-}', not $IMAGE_AWS_CONFIG; the credential_process would never run"
+    [ -n "${AWS_SDK_LOAD_CONFIG-}" ] || die "NODE_STORAGE_CREDENTIALS_URL is set but AWS_SDK_LOAD_CONFIG is empty; the credential_process would never run"
+
+    case "${AWS_PROFILE:-default}" in
+        default) ;;
+        *) die "NODE_STORAGE_CREDENTIALS_URL is set but AWS_PROFILE selects '${AWS_PROFILE}'; the credential_process lives in [default]" ;;
+    esac
+
+    log "step 2/4 storage credentials mode=process url=${NODE_STORAGE_CREDENTIALS_URL}"
+
+    # Run the helper once here so a wrong URL or token fails at boot with the helper's
+    # own message, not as an opaque credential error inside Litestream. The output
+    # holds the credentials: only the expiry is kept.
+    if ! _creds="$("$STORAGE_CREDENTIALS_HELPER")"; then
+        die "storage credentials preflight failed (see the storage-credentials line above); refusing to start without replica credentials"
+    fi
+
+    _expiration="$(printf '%s' "$_creds" | sed -n 's/.*"Expiration"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    unset _creds
+
+    log "step 2/4 storage credentials preflight ok (expiration=${_expiration:-none})"
+else
+    # Static mode must behave exactly as it did before the image carried an AWS config
+    # file, so switch that file back off unless the operator pointed at their own.
+    if [ "${AWS_CONFIG_FILE-}" = "$IMAGE_AWS_CONFIG" ]; then
+        unset AWS_CONFIG_FILE AWS_SDK_LOAD_CONFIG
+    fi
+
+    _present=""
+
+    for _var in LITESTREAM_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+        eval "_val=\${$_var-}"
+        [ -z "$_val" ] || _present="$_present $_var"
+    done
+
+    unset _val
+
+    log "step 2/4 storage credentials mode=static (from the environment:${_present:- none})"
+fi
 
 # A bootstrap that was interrupted between minting the API key and delivering it
 # leaves a database on disk that nobody can drive and that was never replicated
