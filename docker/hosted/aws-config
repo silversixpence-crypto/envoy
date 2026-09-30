@@ -1,0 +1,11 @@
+# AWS shared config for the hosted Envoy node, installed at /etc/aws/config.
+#
+# Used only when the Worker sets NODE_STORAGE_CREDENTIALS_URL (process mode). The AWS SDK
+# inside Litestream reads this because Dockerfile.hosted sets AWS_CONFIG_FILE and
+# AWS_SDK_LOAD_CONFIG=1, runs the helper for credentials and runs it again when the
+# Expiration it returned has passed. Credentials in the environment take precedence over
+# this file, which is why the entrypoint refuses to start in process mode with any
+# AWS_* or LITESTREAM_* key variable set. See docker/hosted/README.md.
+
+[default]
+credential_process = /usr/local/bin/storage-credentials

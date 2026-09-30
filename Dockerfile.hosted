@@ -36,7 +36,8 @@ LABEL description="TRISA Envoy node, TRP-only, SQLite replicated with Litestream
 
 # curl is not a debugging convenience: the entrypoint's bootstrap callback uses it to
 # hand the node's first API key back to whatever provisioned it, because a hosted
-# container has no `docker exec`. See docker/hosted/README.md.
+# container has no `docker exec`, and the storage-credentials helper uses it to fetch
+# the node's R2 credentials from the Worker. See docker/hosted/README.md.
 RUN set -x && apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates sqlite3 curl && \
     rm -rf /var/lib/apt/lists/*
@@ -47,7 +48,19 @@ COPY --from=litestream/litestream:0.3.13 /usr/local/bin/litestream /usr/local/bi
 COPY docker/hosted/litestream.yml /etc/litestream.yml
 COPY docker/hosted/entrypoint.sh /usr/local/bin/hosted-entrypoint.sh
 
-RUN chmod 0755 /usr/local/bin/hosted-entrypoint.sh && \
+# Process-mode storage credentials: the SDK inside Litestream runs the helper named in
+# /etc/aws/config and runs it again when the credentials it returned expire, so the
+# Worker can rotate them without a restart. The entrypoint turns these two variables
+# off again in static mode (AWS_* or LITESTREAM_* keys in the environment). See
+# docker/hosted/README.md.
+COPY docker/hosted/storage-credentials.sh /usr/local/bin/storage-credentials
+COPY docker/hosted/aws-config /etc/aws/config
+
+ENV AWS_CONFIG_FILE=/etc/aws/config
+ENV AWS_SDK_LOAD_CONFIG=1
+
+RUN chmod 0755 /usr/local/bin/hosted-entrypoint.sh /usr/local/bin/storage-credentials && \
+    chmod 0644 /etc/aws/config && \
     mkdir -p /data /run/node && chmod 0700 /run/node
 
 # Declarative only under Docker and on Cloudflare Containers in production, but
